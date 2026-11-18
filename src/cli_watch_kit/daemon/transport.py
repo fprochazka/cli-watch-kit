@@ -43,6 +43,10 @@ class DaemonUnavailable(ConnectionError):
     """No daemon answers on the endpoint."""
 
 
+class DaemonTimeout(TimeoutError):
+    """The daemon took the request but did not answer in time. Unlike a gone daemon, it may still carry it out."""
+
+
 class DaemonStartFailed(DaemonUnavailable):
     """A daemon was started but failed before it listened; trying again would fail the same way."""
 
@@ -238,15 +242,19 @@ def _connect(files: DaemonFiles, timeout: float) -> tuple[socket.socket, str | N
 
 
 def request(files: DaemonFiles, payload: dict[str, Any], timeout: float = 10.0) -> dict[str, Any]:
-    """Send one request and return the response. Raises DaemonUnavailable when nothing answers."""
+    """Send one request and return the response.
+
+    Raises :class:`DaemonUnavailable` when no daemon listens, or it closed the connection or cut its answer short (a
+    request to a daemon that died is safe to send again), and :class:`DaemonTimeout` when it did not answer within
+    `timeout` seconds (it may still be working on it)."""
     sock, token = _connect(files, timeout)
     with sock:
         body = dict(payload)
         if token is not None:
             body["token"] = token
+        chunks = []
         try:
             sock.sendall(json.dumps(body, separators=(",", ":")).encode() + b"\n")
-            chunks = []
             total = 0
             while True:
                 chunk = sock.recv(65536)
@@ -256,12 +264,18 @@ def request(files: DaemonFiles, payload: dict[str, Any], timeout: float = 10.0) 
                 total += len(chunk)
                 if chunk.endswith(b"\n") or total > MAX_LINE:
                     break
+        except TimeoutError as exc:
+            # The daemon is there but slow; it may still carry out the request, so this is no reason to retry it.
+            raise DaemonTimeout(f"the daemon did not answer within {timeout:.0f} s") from exc
         except OSError as exc:
             raise DaemonUnavailable(str(exc)) from exc
     raw = b"".join(chunks)
     if not raw.strip():
         raise DaemonUnavailable("the daemon closed the connection without answering")
-    response = json.loads(raw)
+    try:
+        response = json.loads(raw)
+    except ValueError as exc:
+        raise DaemonUnavailable("the daemon's answer was cut off") from exc
     if not isinstance(response, dict):
         raise DaemonUnavailable("the daemon sent an unexpected response")
     return response

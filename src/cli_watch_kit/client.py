@@ -29,15 +29,22 @@ from cli_watch_kit.changelog import Changelog
 from cli_watch_kit.daemon.engine import Engine
 from cli_watch_kit.daemon.lifecycle import ensure_daemon
 from cli_watch_kit.daemon.server import handle
-from cli_watch_kit.daemon.transport import DaemonFiles, DaemonMismatch, DaemonStartFailed, DaemonUnavailable, request
+from cli_watch_kit.daemon.transport import (
+    DaemonFiles,
+    DaemonMismatch,
+    DaemonStartFailed,
+    DaemonTimeout,
+    DaemonUnavailable,
+    request,
+)
 from cli_watch_kit.durations import format_duration
 from cli_watch_kit.events import WATCH_ENDED, WATCH_STARTED, Event, utc_now_iso
 from cli_watch_kit.sinks import Sink, StatusOutput
 from cli_watch_kit.source import NotFound, Params, Target
 from cli_watch_kit.timers import ClientTimer, IdleTimer
 
-OP_TIMEOUT = 300.0
-"""An extra op may wait for the account's budget and then download something large."""
+OP_TIMEOUT = 660.0
+"""An extra op may wait up to `Engine.await_budget`'s 600 s for the account's budget, then download something large."""
 RETRYABLE_REASONS = frozenset({"error", "rate_limited"})
 """Reasons of a refused subscription that may pass by themselves: the source could not reach its API."""
 EXIT_OK = 0
@@ -372,6 +379,10 @@ class Watcher:
                 raise
             except (DaemonUnavailable, TimeoutError) as exc:
                 error = exc
+                if isinstance(exc, DaemonTimeout):
+                    # The daemon may have created the subscription after all. A new client id lets that one expire
+                    # with its lease, instead of being renewed by this watcher's polls for nothing.
+                    self.client_id = uuid.uuid4().hex
             if deadline is not None and self.clock() + delay >= deadline:
                 self.request_stop("timeout")
                 return False
@@ -417,7 +428,16 @@ class Watcher:
                     return EXIT_OK
                 assert self._subscription is not None
                 self.sink.tick()
-                response = self.backend.poll(self.client_id, {self._subscription: self._cursor})
+                try:
+                    response = self.backend.poll(self.client_id, {self._subscription: self._cursor})
+                except DaemonTimeout as exc:
+                    # A busy daemon: polling is safe to repeat, so ask again rather than give up the watch.
+                    if deadline is not None and self.clock() >= deadline:
+                        self._finish(self._end_event("timeout"))
+                        return EXIT_OK
+                    self.status.line(f"{exc}; polling again")
+                    self._wakeup.wait(1.0)
+                    continue
                 if self._subscription in response.get("unknown", []):
                     self.status.line("daemon restarted, subscribing again")
                     if self._resubscribe(deadline):
