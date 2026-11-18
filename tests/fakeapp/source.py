@@ -196,6 +196,9 @@ class FakeSource(Source[Snapshot]):
             return PollOutcome(snapshot, raw, ended="done", end_data={"status": "done"})
         return PollOutcome(snapshot, raw)
 
+    def status(self) -> dict[str, Any]:
+        return {"calls": len(self.calls)}
+
     def summary(self, target: Target, snapshot: Snapshot | None) -> dict[str, Any]:
         return dict(snapshot or {})
 

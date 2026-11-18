@@ -341,6 +341,7 @@ def test_daemon_cli_status_and_stop(daemon_env: DaemonEnv) -> None:
     assert json.loads(status.stdout)["app_protocol"] == 1
     text = subprocess.run([*cli, "status"], capture_output=True, text=True, timeout=30)
     assert text.stdout.startswith("daemon: pid ") and "subscription " in text.stdout and "account -:" in text.stdout
+    assert 'source: {"calls":' in text.stdout
     logs = subprocess.run([*cli, "logs", "-n", "5"], capture_output=True, text=True, timeout=30)
     assert logs.stdout.startswith(f"==> {daemon_env.files.log}")
     stop = subprocess.run([*cli, "stop"], capture_output=True, text=True, timeout=30)

@@ -237,6 +237,10 @@ class Source[S](ABC):
         """A snapshot from :meth:`encode` (a baseline a watcher kept). Raise `ValueError` when it does not fit."""
         return data  # type: ignore[no-any-return]
 
+    def status(self) -> dict[str, Any]:
+        """What `daemon status` shows about the source, such as request counts per host. Never put params here."""
+        return {}
+
     def check_options(self, target: Target, options: Mapping[str, Any]) -> Mapping[str, Any]:
         """Validate the source options a watcher subscribes with, and return them normalized. Raise `ValueError`
         with a message for the watcher when they cannot work. Default: any options are taken as they are."""

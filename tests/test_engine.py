@@ -324,6 +324,7 @@ def test_status_reports_calls_and_batches_per_account(clock: Clock) -> None:
     run(scenario())
     status = engine.status()
     assert status["accounts"][""]["calls"] == 2
+    assert status["source"] == {"calls": 2}
     assert status["accounts"][""]["recent_batches"] == [["item a"], ["item a"]]
     assert status["resources"][0]["resource"] == ITEM.key
     assert status["accounts"][""]["budget"]["dimensions"]["complexity"]["spent"] == 20

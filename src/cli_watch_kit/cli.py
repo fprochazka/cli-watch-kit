@@ -380,4 +380,6 @@ def format_status(status: Mapping[str, Any], files: DaemonFiles) -> list[str]:
             f"account {name or '-'}: {account['calls']} calls for {account['items']} items,"
             f" stretch {account['stretch']}, {dims}"
         )
+    if status.get("source"):
+        lines.append(f"source: {json.dumps(status['source'], separators=(',', ':'))}")
     return lines

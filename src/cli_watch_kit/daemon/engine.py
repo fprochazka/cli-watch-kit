@@ -295,6 +295,7 @@ class Engine:
                 for name, a in sorted(self.accounts.items())
             },
             "cache": self.cache.describe(),
+            "source": self.source.status(),
         }
 
     # ----------------------------------------------------------------------------------------------------------
