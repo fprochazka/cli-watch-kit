@@ -354,6 +354,7 @@ def test_a_second_watcher_of_the_same_resource_dir_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(cli, "default_backend", lambda app, no_daemon: ScriptedBackend([]))
+    monkeypatch.setattr(cli, "DIR_LOCK_WAIT", 0.2)
     app = WatchApp("inproc", FakeSource(), "unused.daemon", 1, "0", "inproc: ", "inproc-watcher")
     options = WatchOptions(timeout="1s", events_stream="stdout", base_dir=tmp_path)
     (tmp_path / "item" / "a").mkdir(parents=True)
@@ -363,6 +364,25 @@ def test_a_second_watcher_of_the_same_resource_dir_is_refused(
         assert "another watcher already watches item a into" in capsys.readouterr().err
     assert not (tmp_path / "item" / "a" / "events.jsonl").exists()
     assert cli.run_watch(app, TARGET, options) == 0
+
+
+def test_a_watcher_waits_for_a_stopped_one_that_is_still_finishing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "default_backend", lambda app, no_daemon: ScriptedBackend([]))
+    app = WatchApp("inproc", FakeSource(), "unused.daemon", 1, "0", "inproc: ", "inproc-watcher")
+    options = WatchOptions(timeout="1s", events_stream="stdout", base_dir=tmp_path)
+    (tmp_path / "item" / "a").mkdir(parents=True)
+    old = FileLock(tmp_path / "item" / "a" / cli.DIR_LOCK)
+    assert old.try_acquire()
+    finishing = threading.Timer(1.0, old.release)
+    finishing.start()
+    try:
+        assert cli.run_watch(app, TARGET, options) == 0
+    finally:
+        finishing.cancel()
+        old.release()
+    assert (tmp_path / "item" / "a" / "events.jsonl").is_file()
 
 
 def test_a_stdout_watcher_under_a_session_writes_into_its_scratchpad(

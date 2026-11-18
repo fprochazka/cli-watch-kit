@@ -35,7 +35,7 @@ from cli_watch_kit.daemon.lifecycle import daemon_running, stop_daemon
 from cli_watch_kit.daemon.transport import DaemonFiles, DaemonTimeout, DaemonUnavailable, request
 from cli_watch_kit.durations import format_duration, parse_duration
 from cli_watch_kit.events import LIFECYCLE_KINDS, FilterError
-from cli_watch_kit.locks import FileLock
+from cli_watch_kit.locks import FileLock, LockTimeout
 from cli_watch_kit.paths import sanitize_part
 from cli_watch_kit.sinks import Sink, StatusOutput
 from cli_watch_kit.source import Target
@@ -43,6 +43,8 @@ from cli_watch_kit.timers import ClientTimer
 
 EXIT_USAGE = 2
 DIR_LOCK = ".watcher.lock"
+# How long a watcher waits for the resource dir: a stopped watcher unsubscribes and flushes its stream for a moment.
+DIR_LOCK_WAIT = 5.0
 """The lock file in a resource dir that keeps a second watcher of the same resource out of it."""
 
 
@@ -213,10 +215,13 @@ def run_watch(
         status.line(f"error: {exc}")
         return exc.code if isinstance(exc, _Usage) else EXIT_USAGE
     # One watcher per resource dir: two would interleave their seq numbers in one events.jsonl and overwrite each
-    # other's baseline. The OS releases the lock when the watcher dies.
+    # other's baseline. The OS releases the lock when the watcher dies. A watcher that was just stopped, so that this
+    # one can replace it, may still be finishing, so wait for it a moment before refusing.
     changelog.dir.mkdir(parents=True, exist_ok=True)
     dir_lock = FileLock(changelog.dir / DIR_LOCK)
-    if not dir_lock.try_acquire():
+    try:
+        dir_lock.acquire(DIR_LOCK_WAIT)
+    except LockTimeout:
         status.line(
             f"error: another watcher already watches {target.key} into {changelog.dir}; stop that one first, or give"
             " this one its own --base-dir"

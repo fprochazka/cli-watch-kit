@@ -163,7 +163,7 @@ def test_a_later_watcher_gets_watch_started_with_the_current_state_and_no_backlo
 
 def test_a_second_watcher_into_the_same_base_dir_is_refused_while_another_dir_works(daemon_env: DaemonEnv) -> None:
     one = daemon_env.root / "one"
-    first = _start(daemon_env, one, "--timeout=4s")
+    first = _start(daemon_env, one, "--timeout=60s")
     _wait_kinds(one, ["watch_started"])
     refused = _start(daemon_env, one, "--timeout=4s")
     out, err = refused.communicate(timeout=30)
@@ -171,4 +171,5 @@ def test_a_second_watcher_into_the_same_base_dir_is_refused_while_another_dir_wo
     assert "another watcher already watches item a" in err
     other = _start(daemon_env, daemon_env.root / "two", "--timeout=2s")
     assert [e["kind"] for e in _finish(other, daemon_env.root / "two")] == ["watch_started", "watch_ended"]
+    first.send_signal(signal.SIGTERM)
     assert [e["kind"] for e in _finish(first, one)] == ["watch_started", "watch_ended"]
