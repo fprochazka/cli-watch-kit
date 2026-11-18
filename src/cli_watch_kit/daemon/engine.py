@@ -668,7 +668,9 @@ class Engine:
         delay: float | None = None
         error = outcome.error
         if error is not None:
-            if isinstance(error, NotFound) and not res.polled:
+            if isinstance(error, NotFound) and not res.polled and res.snapshot is None:
+                # Not found before anything was ever seen: the watcher asked for something that does not exist.
+                # A resource seeded from a baseline existed before the restart, so a 404 now may be passing.
                 self._end(res, NotFound.reason, {"message": str(error)})
             else:
                 self._degrade(res, error.reason, str(error) or type(error).__name__)

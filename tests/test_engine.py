@@ -516,3 +516,16 @@ def test_private_events_and_the_snapshot_come_again_until_their_answer_is_acknow
         assert engine.poll("client", {sid: 0}, acked["acks"])["events"] == {}
 
     run(scenario())
+
+
+def test_a_404_right_after_a_restart_degrades_a_seeded_watch_instead_of_ending_it(clock: Clock) -> None:
+    engine = Engine(FakeSource(World()), clock=clock)
+
+    async def scenario() -> None:
+        sub = await engine.subscribe("client", ITEM, ALL_ITEM, baseline={"status": "open", "notes": 0})
+        await engine.poll_due_once()
+        events = events_of(engine.poll("client", {sub["subscription_id"]: 0}), sub["subscription_id"])
+        assert [(e["kind"], e["data"].get("reason")) for e in events] == [("watch_degraded", "not_found")]
+        assert not engine.resources[ITEM.key].ended
+
+    run(scenario())
