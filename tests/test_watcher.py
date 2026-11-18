@@ -17,7 +17,7 @@ from cli_watch_kit import cli
 from cli_watch_kit.app import WatchApp
 from cli_watch_kit.changelog import Changelog
 from cli_watch_kit.cli import WatchOptions
-from cli_watch_kit.client import InProcessBackend, Watcher, WatchSettings, WriterContext
+from cli_watch_kit.client import BackendError, InProcessBackend, Watcher, WatchSettings, WriterContext
 from cli_watch_kit.events import Event
 from cli_watch_kit.locks import LockTimeout
 from cli_watch_kit.sinks import StatusOutput, StdoutSink
@@ -285,3 +285,55 @@ def test_a_spawn_lock_timeout_ends_the_watch_with_an_error_line(tmp_path: Path) 
     )
     assert watcher.run() == 1
     assert "test: error: could not lock spawn.lock within 10 s" in status.getvalue()
+
+
+class FlakySubscribeBackend(ScriptedBackend):
+    """Its second subscribe fails once, as when the API is unreachable after a suspend."""
+
+    failed = False
+
+    def subscribe(self, client_id: str, target: Target, events: frozenset[str], *rest: Any) -> tuple[str, int]:
+        if self.subscriptions and not self.failed:
+            self.failed = True
+            raise BackendError("the API is unreachable", "error")
+        return super().subscribe(client_id, target, events, *rest)
+
+
+def test_a_failed_resubscribe_is_retried_with_a_backoff(tmp_path: Path) -> None:
+    backend = FlakySubscribeBackend(
+        [[daemon_event("watch_started", 0, summary={}, snapshot_hash="h1")], "restart", [daemon_event("note_added", 1)]]
+    )
+    status = io.StringIO()
+    out = io.StringIO()
+    watcher = Watcher(
+        WatchSettings(TARGET, ALL, timeout=60),
+        backend,
+        StdoutSink(out),
+        Changelog(tmp_path, TARGET.key),
+        StatusOutput("test: ", status),
+        clock=Ticks(),
+        retry_delays=(0.01, 0.02),
+    )
+    assert watcher.run() == 0
+    assert status.getvalue().count("subscribing again failed: the API is unreachable") == 1
+    assert [e["kind"] for e in lines_of(out)] == ["watch_started", "note_added", "watch_ended"]
+
+
+def test_a_refused_resubscribe_that_cannot_pass_ends_the_watch(tmp_path: Path) -> None:
+    class Refusing(ScriptedBackend):
+        def subscribe(self, client_id: str, target: Target, events: frozenset[str], *rest: Any) -> tuple[str, int]:
+            if self.subscriptions:
+                raise BackendError("the token was refused", "auth")
+            return super().subscribe(client_id, target, events, *rest)
+
+    status = io.StringIO()
+    watcher = Watcher(
+        WatchSettings(TARGET, ALL, timeout=60),
+        Refusing([[daemon_event("watch_started", 0, summary={})], "restart"]),
+        StdoutSink(io.StringIO()),
+        Changelog(tmp_path, TARGET.key),
+        StatusOutput("test: ", status),
+        clock=Ticks(),
+    )
+    assert watcher.run() == 1
+    assert "test: error: the token was refused" in status.getvalue()

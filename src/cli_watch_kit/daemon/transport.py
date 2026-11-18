@@ -40,6 +40,10 @@ class DaemonUnavailable(ConnectionError):
     """No daemon answers on the endpoint."""
 
 
+class DaemonStartFailed(DaemonUnavailable):
+    """A daemon was started but failed before it listened; trying again would fail the same way."""
+
+
 class DaemonMismatch(RuntimeError):
     """The daemon does not know a request: it runs other code than the watcher under the same protocol versions."""
 

@@ -237,6 +237,14 @@ class Source[S](ABC):
         """Poll every target of `batch` and return an outcome per target key. A target left out counts as a
         transient error. Raise a :class:`SourceError` when the whole call failed."""
 
+    def diff(self, target: Target, previous: S, current: S, events: frozenset[str]) -> Sequence[RawEvent]:
+        """The events between two snapshots, limited to `events`: the same pure diff :meth:`poll` uses.
+
+        The engine calls it when a watcher resubscribes with a baseline (after a daemon restart, a drain or an
+        expired lease) to a resource that other watchers keep polling, so this watcher still learns what changed
+        in the gap. Default: no events, and the watcher only gets the new snapshot in `watch_started`."""
+        return ()
+
     def summary(self, target: Target, snapshot: S | None) -> dict[str, Any]:
         """A compact description of the snapshot, sent in `watch_started`."""
         return {}

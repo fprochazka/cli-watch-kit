@@ -151,11 +151,16 @@ class Engine:
         source: Source[Any],
         *,
         clock: Callable[[], float] = time.time,
+        lease_clock: Callable[[], float] | None = None,
         lease_timeout: float = DEFAULT_LEASE_TIMEOUT,
         client_poll_ms: int = DEFAULT_CLIENT_POLL_MS,
     ) -> None:
+        """`clock` is wall time, because APIs report reset times as wall time. Leases run on `lease_clock`, by default
+        a monotonic clock (the given `clock` when it is not the wall clock, as in tests), so a jump of the wall
+        clock or a suspend does not expire every lease at once."""
         self.source = source
         self.clock = clock
+        self.lease_clock = lease_clock or (time.monotonic if clock is time.time else clock)
         self.lease_timeout = lease_timeout
         self.client_poll_ms = client_poll_ms
         self.started_at = clock()
@@ -195,7 +200,7 @@ class Engine:
         if params:
             # The latest key of an account wins: a rotated key replaces the old one for every watcher of the account.
             account.params = params
-        now = self.clock()
+        now = self.lease_clock()
         res = self._acquire(account_name, target)
         if baseline is not None and not res.polled and res.snapshot is None:
             self._seed(res, baseline)
@@ -207,6 +212,8 @@ class Engine:
         if res.polled:
             sub.private.append(self._started_event(res))
             sub.started = True
+            if baseline is not None:
+                sub.private.extend(self._gap_events(res, baseline, sub.events))
         if res.end_event is not None:
             sub.private.append(res.end_event)
         self._recompute_wants(res)
@@ -215,7 +222,7 @@ class Engine:
         return {"subscription_id": sub.id, "cursor": cursor}
 
     def poll(self, client_id: str, cursors: Mapping[str, int]) -> dict[str, Any]:
-        now = self.clock()
+        now = self.lease_clock()
         for owned in self.subscriptions.values():
             if owned.client_id == client_id:
                 owned.renewed_at = now
@@ -251,7 +258,9 @@ class Engine:
             return 0.0
         return now - self._idle_since
 
-    def reap(self, now: float) -> None:
+    def reap(self, now: float | None = None) -> None:
+        """Drop the subscriptions whose lease ran out; `now` is on the lease clock."""
+        now = self.lease_clock() if now is None else now
         expired = [s for s in self.subscriptions.values() if now - s.renewed_at > self.lease_timeout]
         for sub in expired:
             self._drop_subscription(sub, "lease expired")
@@ -265,7 +274,7 @@ class Engine:
                     "client_id": s.client_id,
                     "resource": self.resources[s.rid].key if s.rid in self.resources else None,
                     "account": self.resources[s.rid].account if s.rid in self.resources else None,
-                    "idle_s": round(now - s.renewed_at, 1),
+                    "idle_s": round(self.lease_clock() - s.renewed_at, 1),
                     "events": sorted(s.events - frozenset(LIFECYCLE_KINDS)),
                     "options": dict(s.options),
                 }
@@ -419,6 +428,19 @@ class Engine:
             if child.parents.get(res.rid) != kinds:
                 child.parents[res.rid] = kinds
                 self._recompute_wants(child)
+
+    def _gap_events(self, res: Resource, baseline: Any, kinds: frozenset[str]) -> list[Event]:
+        """What changed between a resubscribing watcher's baseline and the snapshot the resource has now."""
+        try:
+            previous = self.source.decode(res.target, baseline)
+            if stable_hash(self.source.encode(previous)) == res.snapshot_hash:
+                return []
+            raws = self.source.diff(res.target, previous, res.snapshot, kinds)
+        except Exception:
+            log.exception("diffing the baseline of %s failed", res.rid)
+            return []
+        observed = utc_now_iso()
+        return [Event(r.kind, res.key, res.seq, observed, dict(r.data), r.artifacts) for r in raws if r.kind in kinds]
 
     def _seed(self, res: Resource, baseline: Any) -> None:
         """Start from a snapshot a watcher kept from an earlier daemon, so the first poll reports what changed."""
@@ -713,7 +735,7 @@ class Engine:
 
     async def poll_due_once(self) -> None:
         """Start every due batch and wait for all of them: one deterministic step, for tests and debugging."""
-        self.reap(self.clock())
+        self.reap()
         self._start_due(self.clock())
         while self._tasks:
             await asyncio.gather(*list(self._tasks))
@@ -723,7 +745,7 @@ class Engine:
         try:
             while not stop.is_set():
                 now = self.clock()
-                self.reap(now)
+                self.reap()
                 wait = self._start_due(now)
                 self._wake.clear()
                 with contextlib.suppress(TimeoutError):

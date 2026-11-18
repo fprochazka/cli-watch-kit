@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Coroutine, Mapping, Sequence
 from typing import Any
 
@@ -427,3 +428,56 @@ def test_a_bug_in_cost_never_stops_the_engine_loop() -> None:
         await task
 
     run(scenario())
+
+
+def test_every_resubscriber_with_a_baseline_gets_the_changes_from_the_gap(clock: Clock) -> None:
+    world = World(items={"a": {"status": "review", "notes": 0}})
+    engine = Engine(FakeSource(world), clock=clock)
+    baseline = {"status": "open", "notes": 0}
+
+    async def scenario() -> None:
+        # After a daemon restart, the first watcher seeds the resource; the second finds it already polled.
+        a = await engine.subscribe("A", ITEM, ALL_ITEM, baseline=baseline)
+        await engine.poll_due_once()
+        b = await engine.subscribe("B", ITEM, ALL_ITEM, baseline=baseline)
+        assert kinds(engine.poll("A", {a["subscription_id"]: a["cursor"]}), a["subscription_id"]) == [
+            "watch_started",
+            "status_changed",
+        ]
+        gap = events_of(engine.poll("B", {b["subscription_id"]: b["cursor"]}), b["subscription_id"])
+        assert [e["kind"] for e in gap] == ["watch_started", "status_changed"]
+        assert gap[1]["data"] == {"id": "a", "from": "open", "to": "review"}
+        # A baseline equal to the current snapshot brings nothing but watch_started.
+        c = await engine.subscribe("C", ITEM, ALL_ITEM, baseline={"status": "review", "notes": 0})
+        assert kinds(engine.poll("C", {c["subscription_id"]: c["cursor"]}), c["subscription_id"]) == ["watch_started"]
+
+    run(scenario())
+
+
+def test_a_watcher_whose_lease_expired_gets_the_gap_when_it_comes_back(clock: Clock) -> None:
+    world = World(items={"a": {"status": "open", "notes": 0}})
+    engine = Engine(FakeSource(world), clock=clock)
+
+    async def scenario() -> None:
+        await engine.subscribe("keeper", ITEM, ALL_ITEM)
+        late = await engine.subscribe("sleeper", ITEM, ALL_ITEM)
+        await engine.poll_due_once()
+        stored = engine.poll("sleeper", {late["subscription_id"]: 0})["snapshots"][late["subscription_id"]]["data"]
+        world.items["a"] = {"status": "open", "notes": 3}
+        for _ in range(3):
+            clock.advance(10)
+            engine.poll("keeper", {})
+            await engine.poll_due_once()
+        assert engine.poll("sleeper", {late["subscription_id"]: 0})["unknown"] == [late["subscription_id"]]
+        back = await engine.subscribe("sleeper", ITEM, ALL_ITEM, baseline=stored)
+        assert kinds(engine.poll("sleeper", {back["subscription_id"]: back["cursor"]}), back["subscription_id"]) == [
+            "watch_started",
+            "note_added",
+        ]
+
+    run(scenario())
+
+
+def test_leases_run_on_a_monotonic_clock_by_default() -> None:
+    engine = Engine(FakeSource(World()))
+    assert engine.lease_clock is time.monotonic

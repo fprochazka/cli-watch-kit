@@ -29,7 +29,7 @@ from cli_watch_kit.changelog import Changelog
 from cli_watch_kit.daemon.engine import Engine
 from cli_watch_kit.daemon.lifecycle import ensure_daemon
 from cli_watch_kit.daemon.server import handle
-from cli_watch_kit.daemon.transport import DaemonFiles, DaemonMismatch, DaemonUnavailable, request
+from cli_watch_kit.daemon.transport import DaemonFiles, DaemonMismatch, DaemonStartFailed, DaemonUnavailable, request
 from cli_watch_kit.durations import format_duration
 from cli_watch_kit.events import WATCH_ENDED, WATCH_STARTED, Event, utc_now_iso
 from cli_watch_kit.sinks import Sink, StatusOutput
@@ -38,6 +38,8 @@ from cli_watch_kit.timers import ClientTimer, IdleTimer
 
 OP_TIMEOUT = 300.0
 """An extra op may wait for the account's budget and then download something large."""
+RETRYABLE_REASONS = frozenset({"error", "rate_limited"})
+"""Reasons of a refused subscription that may pass by themselves: the source could not reach its API."""
 EXIT_OK = 0
 EXIT_ERROR = 1
 
@@ -306,6 +308,7 @@ class Watcher:
         writer: Writer | None = None,
         timers: Sequence[ClientTimer] = (),
         clock: Callable[[], float] = time.monotonic,
+        retry_delays: tuple[float, float] = (1.0, 60.0),
     ) -> None:
         self.settings = settings
         self.backend = backend
@@ -315,6 +318,8 @@ class Watcher:
         self.writer = writer
         self.timers = list(timers)
         self.clock = clock
+        self.retry_delays = retry_delays
+        """The first and the longest wait between attempts to subscribe again."""
         self.client_id = uuid.uuid4().hex
         self._stop_reason: str | None = None
         self._wakeup = threading.Event()
@@ -349,6 +354,32 @@ class Watcher:
         self._subscription, self._cursor = self.backend.subscribe(
             self.client_id, s.target, s.subscribed_events, baseline, s.params, s.source_options
         )
+
+    def _resubscribe(self, deadline: float | None) -> bool:
+        """Subscribe again with the baseline, retrying with a backoff while the trouble may pass (a daemon that is
+        just restarting, an API that is unreachable after a suspend). Return whether it worked; on a stop or the
+        deadline it gives up and the loop ends the watch."""
+        delay, longest = self.retry_delays
+        while True:
+            try:
+                self._subscribe(resubscribe=True)
+                return True
+            except BackendError as exc:
+                if exc.reason not in RETRYABLE_REASONS:
+                    raise
+                error: Exception = exc
+            except DaemonStartFailed:
+                raise
+            except (DaemonUnavailable, TimeoutError) as exc:
+                error = exc
+            if deadline is not None and self.clock() + delay >= deadline:
+                self.request_stop("timeout")
+                return False
+            self.status.line(f"subscribing again failed: {error}; trying again in {format_duration(delay)}")
+            self._wakeup.wait(delay)
+            if self._stop_reason is not None:
+                return False
+            delay = min(delay * 2, longest)
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -389,8 +420,8 @@ class Watcher:
                 response = self.backend.poll(self.client_id, {self._subscription: self._cursor})
                 if self._subscription in response.get("unknown", []):
                     self.status.line("daemon restarted, subscribing again")
-                    self._subscribe(resubscribe=True)
-                    resubscribed = True
+                    if self._resubscribe(deadline):
+                        resubscribed = True
                     continue
                 previous_hash = self._snapshot_hash
                 snapshot = (response.get("snapshots") or {}).get(self._subscription)

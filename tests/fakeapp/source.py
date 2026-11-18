@@ -183,18 +183,23 @@ class FakeSource(Source[Snapshot]):
         if state is None:
             return PollOutcome(error=NotFound(f"no item {target.id}"))
         snapshot: Snapshot = {"status": state.get("status", "open"), "notes": int(state.get("notes", 0))}
-        raw: list[RawEvent] = []
         previous = item.snapshot
-        if previous is not None:
-            if previous["status"] != snapshot["status"] and "status_changed" in item.events:
-                raw.append(
-                    RawEvent("status_changed", {"id": target.id, "from": previous["status"], "to": snapshot["status"]})
-                )
-            if snapshot["notes"] > previous["notes"] and "note_added" in item.events:
-                raw.append(RawEvent("note_added", {"id": target.id, "notes": snapshot["notes"]}))
+        raw = list(self.diff(target, previous, snapshot, item.events)) if previous is not None else []
         if snapshot["status"] == "done":
             return PollOutcome(snapshot, raw, ended="done", end_data={"status": "done"})
         return PollOutcome(snapshot, raw)
+
+    def diff(self, target: Target, previous: Snapshot, current: Snapshot, events: frozenset[str]) -> list[RawEvent]:
+        raw: list[RawEvent] = []
+        if target.kind != "item":
+            return raw
+        if previous["status"] != current["status"] and "status_changed" in events:
+            raw.append(
+                RawEvent("status_changed", {"id": target.id, "from": previous["status"], "to": current["status"]})
+            )
+        if current["notes"] > previous["notes"] and "note_added" in events:
+            raw.append(RawEvent("note_added", {"id": target.id, "notes": current["notes"]}))
+        return raw
 
     def status(self) -> dict[str, Any]:
         return {"calls": len(self.calls)}
