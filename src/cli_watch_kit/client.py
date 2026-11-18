@@ -324,6 +324,12 @@ class WatchSettings:
 
 
 class Watcher:
+    """One watch: subscribes, polls the backend, numbers and delivers the events, and ends.
+
+    It does not lock its resource dir. `run_watch` does, so that a second watcher of the same resource is refused;
+    a CLI that builds Watcher objects itself must make sure no two of them share a changelog.
+    """
+
     def __init__(
         self,
         settings: WatchSettings,
