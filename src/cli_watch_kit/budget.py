@@ -185,6 +185,15 @@ class Budget:
                 factor = max(factor, demand / rate)
         return factor
 
+    def reset_in(self, now: float) -> float | None:
+        """Seconds until the last reported window of any dimension resets, or `None` when none is known."""
+        resets = [d.reset_at - now for d in self.dimensions.values() if d.reset_at is not None and d.reset_at > now]
+        return max(resets) if resets else None
+
+    def windows(self) -> tuple[tuple[str, float | None], ...]:
+        """The reported reset times; a change means a new window began."""
+        return tuple((name, d.reset_at) for name, d in sorted(self.dimensions.items()))
+
     def describe(self, now: float) -> dict[str, Any]:
         self._refill(now)
         return {

@@ -65,6 +65,8 @@ DEFAULT_CLIENT_POLL_MS = 5000
 MAX_ERROR_BACKOFF = 300.0
 MIN_INTERVAL = 0.5
 RECENT_BATCHES = 20
+MAX_STRETCHED_DELAY = 3600.0
+"""The longest a stretched interval grows when the API reports no reset time."""
 FALLBACK_INTERVAL = 60.0
 """The interval of a resource whose source failed to say one."""
 
@@ -140,6 +142,7 @@ class Account:
     calls: int = 0
     items: int = 0
     recent_batches: deque[list[str]] = field(default_factory=lambda: deque(maxlen=RECENT_BATCHES))
+    windows: tuple[tuple[str, float | None], ...] = ()
 
 
 class Engine:
@@ -504,6 +507,24 @@ class Engine:
                     demand[dim] = demand.get(dim, 0.0) + amount / interval
         return self.account(account).budget.stretch_factor(demand, now)
 
+    def _stretched(self, account: str, base: float, now: float) -> float:
+        """`base` stretched under budget pressure, but never past the end of the API's window plus `base`: with
+        nothing left until the window resets, polling resumes when it does, not hours later."""
+        delay = base * self._stretch(account, now)
+        reset_in = self.account(account).budget.reset_in(now)
+        cap = base + reset_in if reset_in is not None else max(base, MAX_STRETCHED_DELAY)
+        return min(delay, cap)
+
+    def _rescale(self, account_name: str, now: float) -> None:
+        """A new window began: bring forward every resource of the account that waits longer than it now has to."""
+        for res in self.resources.values():
+            due = self.scheduler.due_at(res.rid)
+            if res.account != account_name or res.polling or res.ended or due is None:
+                continue
+            wanted = now + self._stretched(account_name, self._interval(res), now)
+            if due > wanted:
+                self.scheduler.schedule(res.rid, wanted)
+
     def _exceeds(self, cost: Mapping[str, float]) -> bool:
         cap = self.source.batch_cost_cap or {}
         return any(cost.get(dim, 0.0) > limit for dim, limit in cap.items())
@@ -557,6 +578,14 @@ class Engine:
             account.budget.on_rate_limited(limited.retry_after, now)
         elif any(o.error is None for o in outcomes.values()):
             account.budget.on_success()
+        windows = account.budget.windows()
+        if windows != account.windows:
+            previous, account.windows = account.windows, windows
+            if previous:
+                try:
+                    self._rescale(account_name, now)
+                except Exception:
+                    log.exception("rescheduling the account %r failed", account_name)
         for res, item in zip(chunk, items, strict=True):
             outcome = outcomes.get(item.key)
             if outcome is None:
@@ -620,7 +649,7 @@ class Engine:
                 self._reconcile_children(res)
                 res.interval = self.source.interval(res.target, res.snapshot)
                 base = outcome.next_delay if outcome.next_delay is not None else self._interval(res)
-                delay = base * self._stretch(res.account, now)
+                delay = self._stretched(res.account, base, now)
         if delay is not None and not res.ended:
             self.scheduler.schedule(res.rid, now + delay)
 

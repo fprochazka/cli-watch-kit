@@ -211,3 +211,36 @@ def test_concurrent_polls_each_charge_their_own_requests_through_the_current_con
 
     asyncio.run(scenario())
     assert PollContext.current() is None
+
+
+def test_nothing_left_waits_for_the_window_to_reset_not_for_hours(clock: Clock) -> None:
+    now = clock()
+    world = world_of("a")
+    world.readings = {"complexity": {"remaining": 0, "reset_at": now + 60}}
+    engine = Engine(FakeSource(world), clock=clock)
+
+    async def scenario() -> None:
+        await engine.subscribe("client", item("a"), KINDS)
+        await engine.poll_due_once()
+        # Without the cap the stretch makes this 10 s interval 100,000 s long.
+        due = engine.scheduler.due_at("item a")
+        assert due is not None and due - now == pytest.approx(70)
+
+    asyncio.run(scenario())
+
+
+def test_a_new_window_brings_the_waiting_targets_forward(clock: Clock) -> None:
+    now = clock()
+    world = world_of("a", "b")
+    world.readings = {"complexity": {"remaining": 0, "reset_at": now + 60}}
+    engine = Engine(FakeSource(world), clock=clock)
+
+    async def scenario() -> None:
+        await engine.subscribe("client", item("a"), KINDS)
+        await engine.poll_due_once()
+        world.readings = {"complexity": {"remaining": 1_000_000, "reset_at": now + 3600}}
+        await engine.subscribe("client", item("b"), KINDS)
+        await engine.poll_due_once()
+        assert engine.scheduler.due_at("item a") == pytest.approx(now + 10)
+
+    asyncio.run(scenario())
