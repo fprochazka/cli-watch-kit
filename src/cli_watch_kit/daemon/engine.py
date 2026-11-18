@@ -694,9 +694,10 @@ class Engine:
             if refund:
                 account.budget.charge(refund, self.clock())
         now = self.clock()
-        limited = next((o.error for o in outcomes.values() if isinstance(o.error, RateLimited)), None)
-        if limited is not None:
-            account.budget.on_rate_limited(limited.retry_after, now)
+        limits = [o.error.retry_after for o in outcomes.values() if isinstance(o.error, RateLimited)] + ctx.rate_limits
+        if limits:
+            known = [r for r in limits if r is not None]
+            account.budget.on_rate_limited(max(known) if known else None, now)
         elif any(o.error is None for o in outcomes.values()):
             account.budget.on_success()
         windows = account.budget.windows()

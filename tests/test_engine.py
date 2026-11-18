@@ -11,9 +11,9 @@ from cli_watch_kit.daemon.engine import Engine, EngineError
 from cli_watch_kit.daemon.scheduler import Scheduler
 from cli_watch_kit.daemon.server import handle
 from cli_watch_kit.events import LIFECYCLE_KINDS
-from cli_watch_kit.source import PollItem, Target, Unauthorized, Wants
+from cli_watch_kit.source import PollContext, PollItem, PollOutcome, Target, Unauthorized, Wants
 from conftest import Clock
-from fakeapp.source import FakeSource, World
+from fakeapp.source import FakeSource, Snapshot, World
 
 ITEM = Target("item", "a")
 ALL_ITEM = frozenset({"status_changed", "note_added"})
@@ -604,5 +604,34 @@ def test_two_resubscribers_with_different_baselines_each_get_their_own_gap(clock
             "status_changed",
             "note_added",
         ]
+
+    run(scenario())
+
+
+class SideRequestLimited(FakeSource):
+    """A source whose poll succeeds but whose side request got a 429 that the poll handled itself."""
+
+    retry_after: float | None = 40.0
+
+    async def poll(self, batch: Sequence[PollItem[Snapshot]], ctx: PollContext) -> Mapping[str, PollOutcome[Snapshot]]:
+        outcomes = await super().poll(batch, ctx)
+        ctx.rate_limited(self.retry_after)
+        return outcomes
+
+
+def test_a_429_the_poll_handled_itself_still_blocks_the_account_and_is_no_success(clock: Clock) -> None:
+    world = World(items={"a": {"status": "open"}})
+    engine = Engine(SideRequestLimited(world), clock=clock)
+
+    async def scenario() -> None:
+        sub = await engine.subscribe("client-a", ITEM, ALL_ITEM)
+        budget = engine.accounts[""].budget
+        backoff = budget.backoff
+        await engine.poll_due_once()
+        assert kinds(engine.poll("client-a", {sub["subscription_id"]: 0}), sub["subscription_id"]) == ["watch_started"]
+        assert budget.rate_limited_count == 1
+        assert budget.blocked_until - clock() == pytest.approx(40.0)
+        # A success would have reset the backoff; the 429 doubled it instead.
+        assert budget.backoff == backoff * 2
 
     run(scenario())

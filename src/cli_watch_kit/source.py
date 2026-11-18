@@ -172,12 +172,20 @@ class PollContext:
     """What the engine charged before the call."""
     spent: dict[str, float] = field(default_factory=dict)
     """What :meth:`spend` charged so far."""
+    rate_limits: list[float | None] = field(default_factory=list)
+    """The `Retry-After` of each 429 :meth:`rate_limited` reported so far, `None` where the API sent none."""
 
     def spend(self, cost: Mapping[str, float]) -> None:
         """Charge what a request really cost. The estimate of each dimension spent on is refunded after the poll."""
         self.budget.charge(cost, self.clock())
         for dim, amount in cost.items():
             self.spent[dim] = self.spent.get(dim, 0.0) + amount
+
+    def rate_limited(self, retry_after: float | None) -> None:
+        """Report a 429 that the poll handled itself, such as a side request it tries again later. The engine then
+        blocks the account for `retry_after` as it does for a poll that failed with :class:`RateLimited`, and does not
+        count the poll as a success. Reporting the 429 of such a failed poll as well changes nothing."""
+        self.rate_limits.append(retry_after)
 
     @staticmethod
     def current() -> PollContext | None:
