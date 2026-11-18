@@ -256,7 +256,10 @@ class Source[S](ABC):
         return {}
 
     def encode(self, snapshot: S) -> Any:
-        """The snapshot as JSON. Default: the snapshot is already JSON."""
+        """The snapshot as JSON. Default: the snapshot is already JSON.
+
+        Its hash decides when watchers get the snapshot again, so it must not change while the target does not:
+        keep fetch times, ETags and other volatile values in `PollItem.state` instead."""
         return snapshot
 
     def decode(self, target: Target, data: Any) -> S:
