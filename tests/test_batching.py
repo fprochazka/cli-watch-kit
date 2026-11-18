@@ -337,3 +337,18 @@ def test_a_new_window_leaves_next_delay_and_error_backoff_alone(clock: Clock) ->
         assert engine.scheduler.due_at("item gone") == gone_due
 
     asyncio.run(scenario())
+
+
+def test_spending_on_one_dimension_keeps_the_estimate_of_the_others(clock: Clock) -> None:
+    world = world_of("a")
+    world.actual_cost = {"requests": 1}
+    engine = Engine(FakeSource(world), clock=clock)
+
+    async def scenario() -> None:
+        await engine.subscribe("client", item("a"), KINDS)
+        await engine.poll_due_once()
+        budget = engine.accounts[""].budget
+        assert budget.dimension("requests").spent == pytest.approx(1)
+        assert budget.dimension("complexity").spent == pytest.approx(10)
+
+    asyncio.run(scenario())

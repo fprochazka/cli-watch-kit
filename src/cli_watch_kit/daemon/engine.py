@@ -643,8 +643,10 @@ class Engine:
             outcomes = {item.key: PollOutcome(error=error) for item in items}
         finally:
             account.inflight -= 1
-            if ctx.spent:
-                account.budget.charge({dim: -amount for dim, amount in ctx.estimate.items()}, self.clock())
+            # The real cost replaces the estimate only in the dimensions the source reported; the others keep it.
+            refund = {dim: -amount for dim, amount in ctx.estimate.items() if dim in ctx.spent}
+            if refund:
+                account.budget.charge(refund, self.clock())
         now = self.clock()
         limited = next((o.error for o in outcomes.values() if isinstance(o.error, RateLimited)), None)
         if limited is not None:

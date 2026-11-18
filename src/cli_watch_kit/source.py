@@ -151,7 +151,8 @@ class PollContext:
 
     The engine charges the account :meth:`Source.cost` before the call. A source that knows what each response really
     cost (an ETag 304 at a tenth of a request, a complexity header) calls :meth:`spend` with it, as often as it sends
-    requests; the engine then gives the estimate back after the call, so the account pays what was spent. `cache` is
+    requests; after the call the engine gives back the estimate of each dimension the source spent on, so the account
+    pays what was spent there and the estimate elsewhere. `cache` is
     shared by the whole daemon; put the version of the value into its key, so a hit is never stale.
     """
 
@@ -166,7 +167,7 @@ class PollContext:
     """What :meth:`spend` charged so far."""
 
     def spend(self, cost: Mapping[str, float]) -> None:
-        """Charge what a request really cost. Once a poll spent anything, the estimate is refunded after it."""
+        """Charge what a request really cost. The estimate of each dimension spent on is refunded after the poll."""
         self.budget.charge(cost, self.clock())
         for dim, amount in cost.items():
             self.spent[dim] = self.spent.get(dim, 0.0) + amount
