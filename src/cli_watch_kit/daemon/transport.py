@@ -52,6 +52,10 @@ class DaemonStartFailed(DaemonUnavailable):
     """A daemon was started but failed before it listened; trying again would fail the same way."""
 
 
+class DaemonHung(DaemonUnavailable):
+    """The daemon holds its lock but answers nothing, and could not be verified and killed."""
+
+
 class DaemonNotTrusted(DaemonUnavailable):
     """The daemon's files do not belong to this user alone, so secrets must not be sent to whatever listens there."""
 
@@ -137,6 +141,13 @@ class DaemonFiles:
             raise DaemonUnavailable(str(exc)) from exc
         except PermissionError as exc:
             raise DaemonNotTrusted(f"not sending secrets to the daemon: {exc}") from exc
+
+    def owner_pid(self) -> int | None:
+        """The pid the daemon wrote into its lock file, if any."""
+        try:
+            return int(self.lock.read_text(encoding="ascii").strip() or "x")
+        except (OSError, ValueError):
+            return None
 
     def lock_held(self) -> bool:
         """Whether a daemon process holds the lock, answering or not."""

@@ -29,10 +29,11 @@ from typing import Any, Protocol
 from cli_watch_kit.app import WatchApp
 from cli_watch_kit.changelog import Changelog
 from cli_watch_kit.daemon.engine import Engine
-from cli_watch_kit.daemon.lifecycle import ensure_daemon
+from cli_watch_kit.daemon.lifecycle import DEFAULT_REQUEST_TIMEOUT, HUNG_AFTER, ensure_daemon, kill_hung_daemon
 from cli_watch_kit.daemon.server import handle
 from cli_watch_kit.daemon.transport import (
     DaemonFiles,
+    DaemonHung,
     DaemonMismatch,
     DaemonNotTrusted,
     DaemonStartFailed,
@@ -136,11 +137,14 @@ class DaemonBackend:
         self.files = files or DaemonFiles.for_app(app)
         self.hello = ensure_daemon(app, self.files)
         self._shutting_down = False
+        self.timeout = app.env_float("REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
+        self._timeouts = 0
 
     def describe(self) -> str:
         return f"pid {self.hello.get('pid')}, endpoint {self.files.describe_endpoint()}, log {self.files.log}"
 
-    def _call(self, payload: dict[str, Any], timeout: float = 10.0) -> dict[str, Any]:
+    def _call(self, payload: dict[str, Any], timeout: float | None = None) -> dict[str, Any]:
+        timeout = self.timeout if timeout is None else timeout
         secret = bool(payload.get("params"))
         try:
             if secret:
@@ -179,7 +183,28 @@ class DaemonBackend:
         return str(response["subscription_id"]), int(response["cursor"])
 
     def poll(self, client_id: str, cursors: dict[str, int], acks: dict[str, int]) -> dict[str, Any]:
-        return self._call({"op": "poll", "client_id": client_id, "cursors": cursors, "acks": acks})
+        """A poll; a daemon that let `HUNG_AFTER` polls in a row time out is taken for hung and replaced.
+
+        It is killed only when its pid is verified (see `kill_hung_daemon`), else this raises `DaemonHung`. The
+        answer of the new daemon names the subscription unknown, and the watcher subscribes again."""
+        payload = {"op": "poll", "client_id": client_id, "cursors": cursors, "acks": acks}
+        try:
+            response = self._call(payload)
+        except DaemonTimeout:
+            self._timeouts += 1
+            if self._timeouts < HUNG_AFTER or self._shutting_down:
+                raise
+            self._timeouts = 0
+            if kill_hung_daemon(self.app, self.files) is None:
+                pid = self.files.owner_pid()
+                raise DaemonHung(
+                    f"the daemon (pid {pid if pid is not None else 'unknown'}) did not answer {HUNG_AFTER} polls in a"
+                    f" row and could not be verified and killed; run `{self.app.command} daemon stop`"
+                ) from None
+            self.hello = ensure_daemon(self.app, self.files)
+            response = self._call(payload)
+        self._timeouts = 0
+        return response
 
     def call(self, op: str, payload: Mapping[str, Any], params: Params | None = None) -> dict[str, Any]:
         body: dict[str, Any] = {**payload, "op": op}
@@ -420,7 +445,7 @@ class Watcher:
                 if exc.reason not in RETRYABLE_REASONS:
                     raise
                 error: Exception = exc
-            except (DaemonStartFailed, DaemonNotTrusted):
+            except (DaemonStartFailed, DaemonNotTrusted, DaemonHung):
                 raise
             except (DaemonUnavailable, TimeoutError) as exc:
                 error = exc
@@ -505,7 +530,7 @@ class Watcher:
                     if deadline is not None and self.clock() >= deadline:
                         self._finish(self._end_event("timeout"))
                         return EXIT_OK
-                    self.status.line(f"{exc}; polling again")
+                    self.status.line(f"{exc}; polling again ({HUNG_AFTER} in a row and the daemon is replaced)")
                     self._wakeup.wait(1.0)
                     continue
                 self._acks = {k: int(v) for k, v in (response.get("acks") or {}).items()}

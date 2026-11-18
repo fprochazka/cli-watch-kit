@@ -25,7 +25,15 @@ from typing import Any
 import pytest
 
 from cli_watch_kit.app import LIB_PROTOCOL, CodeStamp, WatchApp
-from cli_watch_kit.daemon.lifecycle import daemon_running, ensure_daemon, needs_drain, spawn_daemon, stop_daemon
+from cli_watch_kit.daemon.lifecycle import (
+    daemon_running,
+    ensure_daemon,
+    kill_hung_daemon,
+    needs_drain,
+    ping,
+    spawn_daemon,
+    stop_daemon,
+)
 from cli_watch_kit.daemon.transport import DaemonFiles, DaemonStartFailed, DaemonUnavailable, _connect
 from cli_watch_kit.daemon.transport import request as daemon_request
 from cli_watch_kit.source import Target
@@ -456,3 +464,99 @@ def test_a_daemon_that_fails_to_start_says_why_and_is_not_started_again(
     log = daemon_env.files.log.read_text()
     # One attempt, not a respawn loop until the start timeout.
     assert "Traceback" in log and log.count("RuntimeError: the fake source cannot start") == 1
+
+
+DAEMON_CLI = [sys.executable, "-c", "from fakeapp.cli import main; main()", "daemon"]
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses SIGSTOP; a hung daemon is killed only where its pid can be verified")
+def test_a_hung_daemon_is_reported_and_then_replaced(daemon_env: DaemonEnv, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FAKEAPP_REQUEST_TIMEOUT", "0.5")
+    old = ensure_daemon(APP)["pid"]
+    os.kill(old, signal.SIGSTOP)
+    try:
+        assert ping(daemon_env.files, 0.5) is None
+        status = subprocess.run([*DAEMON_CLI, "status"], capture_output=True, text=True, timeout=30)
+        assert status.returncode == 1 and "Traceback" not in status.stderr
+        assert status.stdout.startswith(f"daemon: running (pid {old}) but not answering")
+        started = time.monotonic()
+        new = ensure_daemon(APP)["pid"]
+        assert new != old and time.monotonic() - started < 10
+        wait_for(lambda: not _alive(old), 10, "the hung daemon to be gone")
+        assert "does not answer, killing it" in daemon_env.files.log.read_text()
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(old, signal.SIGCONT)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses SIGSTOP")
+def test_daemon_stop_kills_a_hung_daemon(daemon_env: DaemonEnv, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FAKEAPP_STOP_TIMEOUT", "1")
+    old = ensure_daemon(APP)["pid"]
+    os.kill(old, signal.SIGSTOP)
+    try:
+        stop = subprocess.run([*DAEMON_CLI, "stop"], capture_output=True, text=True, timeout=30)
+        assert stop.returncode == 0, stop.stderr
+        assert stop.stdout.strip() == "daemon: stopped"
+        assert not daemon_running(daemon_env.files)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(old, signal.SIGCONT)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses SIGSTOP")
+def test_a_watcher_replaces_a_hung_daemon_and_carries_on(daemon_env: DaemonEnv) -> None:
+    env = daemon_env.env(FAKEAPP_REQUEST_TIMEOUT="0.5")
+    watch = _watch(["item", "a", "--events-stream=stdout", "--timeout=12s"], env)
+    assert watch.stdout is not None
+    assert json.loads(watch.stdout.readline())["kind"] == "watch_started"
+    old = daemon_request(daemon_env.files, {"op": "hello"})["pid"]
+    os.kill(old, signal.SIGSTOP)
+    try:
+        rest, err = watch.communicate(timeout=60)
+        assert watch.returncode == 0, err
+        assert "polling again" in err and "daemon restarted, subscribing again" in err
+        assert [json.loads(line)["data"]["reason"] for line in rest.splitlines()] == ["timeout"]
+        assert daemon_request(daemon_env.files, {"op": "hello"})["pid"] != old
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(old, signal.SIGCONT)
+
+
+LOCK_HOLDER = """
+import os, sys
+from pathlib import Path
+from cli_watch_kit.locks import FileLock
+lock = FileLock(Path(sys.argv[1]))
+assert lock.try_acquire()
+lock.write_owner(str(os.getpid()))
+print("held", flush=True)
+sys.stdin.readline()
+"""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="no kill on Windows")
+def test_a_lock_holder_that_is_not_our_daemon_is_never_killed(daemon_env: DaemonEnv) -> None:
+    daemon_env.files.state_dir.mkdir(parents=True, exist_ok=True)
+    holder = subprocess.Popen(
+        [sys.executable, "-c", LOCK_HOLDER, str(daemon_env.files.lock)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None and holder.stdout.readline().strip() == "held"
+        assert daemon_env.files.owner_pid() == holder.pid
+        assert kill_hung_daemon(APP, daemon_env.files) is None
+        assert holder.poll() is None
+    finally:
+        holder.kill()
+        holder.wait(timeout=10)

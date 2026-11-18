@@ -32,7 +32,7 @@ from cli_watch_kit.changelog import Changelog
 from cli_watch_kit.claude import MESSAGE_PRIORITIES, STREAM_MODES, StreamError, find_session, open_stream
 from cli_watch_kit.client import Backend, Watcher, WatchSettings, Writer, WriterContext, default_backend
 from cli_watch_kit.daemon.lifecycle import daemon_running, stop_daemon
-from cli_watch_kit.daemon.transport import DaemonFiles, DaemonUnavailable, request
+from cli_watch_kit.daemon.transport import DaemonFiles, DaemonTimeout, DaemonUnavailable, request
 from cli_watch_kit.durations import format_duration, parse_duration
 from cli_watch_kit.events import LIFECYCLE_KINDS, FilterError
 from cli_watch_kit.locks import FileLock
@@ -333,10 +333,16 @@ def daemon_group(app: WatchApp, name: str = "daemon") -> click.Group:
         files = DaemonFiles.for_app(app)
         try:
             response = request(files, {"op": "status"}, timeout=5)
-        except DaemonUnavailable:
-            running = daemon_running(files)
-            click.echo("daemon: not running" if not running else "daemon: running but not answering; see daemon logs")
-            sys.exit(0 if not running else 1)
+        except (DaemonUnavailable, DaemonTimeout):
+            if not daemon_running(files):
+                click.echo("daemon: not running")
+                sys.exit(0)
+            pid = files.owner_pid()
+            click.echo(
+                f"daemon: running (pid {pid if pid is not None else 'unknown'}) but not answering; see"
+                f" `{app.command} daemon logs`, and `{app.command} daemon stop` ends it"
+            )
+            sys.exit(1)
         if as_json:
             click.echo(json.dumps(response, indent=2))
             return
@@ -348,7 +354,8 @@ def daemon_group(app: WatchApp, name: str = "daemon") -> click.Group:
         """Stop the daemon. Running watchers start a new one on their next poll."""
         files = DaemonFiles.for_app(app)
         try:
-            stopped = stop_daemon(files)
+            # A daemon that does not stop by itself (a hung one) is killed, once its pid is verified.
+            stopped = stop_daemon(files, app.env_float("STOP_TIMEOUT", 10.0), kill=app)
         except DaemonUnavailable as exc:
             StatusOutput(app.status_prefix).line(f"error: {exc}")
             sys.exit(1)

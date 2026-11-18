@@ -62,6 +62,14 @@ class FileLock:
                 raise LockTimeout(f"could not lock {self.path} within {timeout:.0f} s")
             time.sleep(0.05)
 
+    def write_owner(self, text: str) -> None:
+        """Put `text` (the holder's pid) into the held lock file, for others to read; POSIX only, since Windows locks
+        the bytes against other readers."""
+        if self._fd is None or sys.platform == "win32":
+            return
+        os.ftruncate(self._fd, 0)
+        os.pwrite(self._fd, text.encode(), 0)
+
     def release(self) -> None:
         fd, self._fd = self._fd, None
         if fd is None:

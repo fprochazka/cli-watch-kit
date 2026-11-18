@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import logging
 import os
 import signal
@@ -28,18 +29,31 @@ import sys
 import time
 import traceback
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from cli_watch_kit.app import WatchApp
 from cli_watch_kit.daemon.engine import Engine
 from cli_watch_kit.daemon.server import handle
-from cli_watch_kit.daemon.transport import DaemonFiles, DaemonStartFailed, DaemonUnavailable, request, start_server
+from cli_watch_kit.daemon.transport import (
+    DaemonFiles,
+    DaemonHung,
+    DaemonStartFailed,
+    DaemonTimeout,
+    DaemonUnavailable,
+    request,
+    start_server,
+)
 from cli_watch_kit.locks import FileLock
 from cli_watch_kit.paths import ensure_private_dir
 
 log = logging.getLogger("cli_watch_kit.daemon")
 
 DEFAULT_IDLE_TIMEOUT = 30.0
+DEFAULT_REQUEST_TIMEOUT = 10.0
+"""Seconds a watcher waits for the daemon's answer; `<PREFIX>REQUEST_TIMEOUT` overrides it."""
+HUNG_AFTER = 3
+"""Polls in a row without an answer after which a watcher takes the daemon for hung and replaces it."""
 SPAWN_TIMEOUT = 10.0
 MAX_LOG_BYTES = 5 * 1024 * 1024
 
@@ -155,6 +169,7 @@ def _serve_daemon(app: WatchApp, ready_fd: int | None) -> int:
             log.info("another daemon holds %s, exiting", files.lock)
             notify()
             return 0
+        lock.write_owner(str(os.getpid()))
         engine = Engine.for_app(app)
         idle_timeout = app.env_float("IDLE_TIMEOUT", DEFAULT_IDLE_TIMEOUT)
         asyncio.run(serve(app, files, engine, idle_timeout, notify))
@@ -169,11 +184,73 @@ def _serve_daemon(app: WatchApp, ready_fd: int | None) -> int:
 
 
 def ping(files: DaemonFiles, timeout: float = 2.0) -> dict[str, Any] | None:
+    """The daemon's hello, or `None` when no daemon answers, a hung one included."""
+    return probe(files, timeout)[1]
+
+
+def probe(files: DaemonFiles, timeout: float = 2.0) -> tuple[str, dict[str, Any] | None]:
+    """`("ok", hello)`, `("none", None)` when no daemon listens, or `("hung", None)` when one took the request but
+    did not answer within `timeout` seconds."""
     try:
         response = request(files, {"op": "hello"}, timeout=timeout)
+    except DaemonTimeout:
+        return "hung", None
     except (DaemonUnavailable, ValueError):
+        return "none", None
+    return ("ok", response) if response.get("ok") else ("none", None)
+
+
+def is_our_daemon(pid: int, daemon_module: str) -> bool:
+    """Whether process `pid` runs `python -m <daemon_module>`. Checked before a hung daemon is killed, so a pid that
+    was reused by another program is never hit."""
+    if sys.platform.startswith("linux"):
+        try:
+            argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        except OSError:
+            return False
+        module = daemon_module.encode()
+        return any(a == b"-m" and b == module for a, b in itertools.pairwise(argv))
+    if os.name == "nt":
+        return False
+    try:
+        command = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return f"-m {daemon_module}" in command.stdout
+
+
+def kill_hung_daemon(app: WatchApp, files: DaemonFiles, timeout: float = 5.0) -> int | None:
+    """Kill the daemon that holds the lock, if its pid is verified: it is in the lock file, the lock is held, and the
+    process runs the app's daemon module. Return the pid once the lock is free, or `None` when it could not be done
+    (no pid, another program, Windows)."""
+    pid = files.owner_pid()
+    if pid is None or pid == os.getpid() or not files.lock_held() or not is_our_daemon(pid, app.daemon_module):
         return None
-    return response if response.get("ok") else None
+    log.warning("the daemon pid %d does not answer, killing it", pid)
+    # The daemon's own log is where someone looks for why it went away, so the killer notes it there too.
+    with contextlib.suppress(OSError), open(files.log, "a", encoding="utf-8") as daemon_log:
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        daemon_log.write(
+            f"{stamp} WARNING cli_watch_kit.daemon: pid {os.getpid()}: the daemon pid {pid} does not answer,"
+            " killing it\n"
+        )
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
+    deadline = time.monotonic() + timeout
+    while files.lock_held():
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.05)
+    return pid
+
+
+def _replace_hung(app: WatchApp, files: DaemonFiles) -> None:
+    if kill_hung_daemon(app, files) is None:
+        pid = files.owner_pid()
+        raise DaemonHung(
+            f"the daemon (pid {pid if pid is not None else 'unknown'}) holds its lock but does not answer, and it"
+            f" could not be verified and killed; stop it with `{app.command} daemon stop` or kill it"
+        )
 
 
 def needs_drain(daemon: Mapping[str, Any], mine: Mapping[str, Any]) -> bool:
@@ -237,21 +314,29 @@ def ensure_daemon(
     """
     files = files or DaemonFiles.for_app(app)
     mine = app.identity()
-    hello = ping(files)
+    answer = app.env_float("REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
+    hello = ping(files, min(2.0, answer))
     if hello is not None and not (drain and needs_drain(hello, mine)):
         return hello
     files.check_socket_path()
     with FileLock(files.spawn_lock) as spawn_lock:
         spawn_lock.acquire(timeout)
         deadline = time.monotonic() + timeout
-        hello = ping(files)
-        if hello is not None and drain and needs_drain(hello, mine):
-            with contextlib.suppress(DaemonUnavailable, ValueError):
+        state, hello = probe(files, min(2.0, answer))
+        if state == "hung" and probe(files, min(2.0, answer))[0] == "hung":
+            # Twice without an answer to a hello, which needs no work: the daemon is stuck, not busy.
+            _replace_hung(app, files)
+        elif hello is not None and drain and needs_drain(hello, mine):
+            try:
                 request(files, {"op": "drain", **mine}, timeout=2.0)
+            except DaemonTimeout:
+                _replace_hung(app, files)
+            except (DaemonUnavailable, ValueError):
+                pass
             _wait_stopped(files, deadline)
         spawned: subprocess.Popen[bytes] | None = None
         while time.monotonic() < deadline:
-            hello = ping(files, timeout=1.0)
+            hello = ping(files, timeout=min(1.0, answer))
             if hello is not None:
                 return hello
             if spawned is not None and spawned.poll() not in (None, 0) and not daemon_running(files):
@@ -281,15 +366,22 @@ def daemon_running(files: DaemonFiles) -> bool:
     return files.lock_held()
 
 
-def stop_daemon(files: DaemonFiles, timeout: float = 10.0) -> bool:
-    """Ask the daemon to stop and wait until it released its lock. Return whether one was running."""
+def stop_daemon(files: DaemonFiles, timeout: float = 10.0, *, kill: WatchApp | None = None) -> bool:
+    """Ask the daemon to stop and wait until it released its lock. Return whether one was running.
+
+    A daemon that does not stop within `timeout` seconds (a hung one) is killed when `kill` names its app and its pid
+    is verified (see :func:`kill_hung_daemon`); otherwise this raises :class:`DaemonHung`.
+    """
     if not daemon_running(files):
         return False
-    with contextlib.suppress(DaemonUnavailable, ValueError):
+    with contextlib.suppress(DaemonUnavailable, DaemonTimeout, ValueError):
         request(files, {"op": "stop"}, timeout=2.0)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not daemon_running(files):
             return True
         time.sleep(0.05)
-    raise DaemonUnavailable(f"the daemon did not stop within {timeout:.0f} s; see {files.log}")
+    if kill is not None and kill_hung_daemon(kill, files) is not None:
+        return True
+    pid = files.owner_pid()
+    raise DaemonHung(f"the daemon (pid {pid if pid is not None else 'unknown'}) did not stop within {timeout:.0f} s")
