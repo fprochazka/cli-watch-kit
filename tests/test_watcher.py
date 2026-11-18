@@ -423,3 +423,64 @@ def test_a_resubscribe_that_meets_a_bug_in_the_daemon_is_retried(tmp_path: Path)
         assert raised.value.reason in RETRYABLE_REASONS
     finally:
         engine_backend.close()
+
+
+class SlowSink(StdoutSink):
+    """A healthy sink that takes a moment per write, like a message to a Claude Code session."""
+
+    name = "slow"
+
+    def __init__(self) -> None:
+        super().__init__(io.StringIO())
+        self.kinds: list[str] = []
+
+    def emit(self, events: Any) -> None:
+        time.sleep(0.4)
+        self.kinds.extend(e.kind for e in events)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="sends itself SIGTERM")
+def test_a_stop_signal_lets_a_healthy_write_finish(tmp_path: Path) -> None:
+    sink = SlowSink()
+    watcher = Watcher(
+        WatchSettings(TARGET, ALL),
+        ScriptedBackend([[daemon_event("watch_started", 0, summary={})]]),
+        sink,
+        Changelog(tmp_path, TARGET.key),
+        StatusOutput("test: ", io.StringIO()),
+        clock=Ticks(),
+    )
+    threading.Timer(0.2, os.kill, (os.getpid(), signal.SIGTERM)).start()
+    assert watcher.run() == 0
+    assert sink.kinds == ["watch_started", "watch_ended"]
+
+
+def test_handlers_not_set_from_python_are_put_back_as_the_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    saved = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+    original = signal.signal
+    restored: list[Any] = []
+
+    def fake_signal(sig: int, handler: Any) -> Any:
+        previous = original(sig, handler)
+        if handler is signal.SIG_DFL or not callable(handler):
+            restored.append(handler)
+            return previous
+        return None  # as for a handler installed by C code
+
+    monkeypatch.setattr(signal, "signal", fake_signal)
+    try:
+        watcher = Watcher(
+            WatchSettings(TARGET, ALL, timeout=3),
+            ScriptedBackend([[daemon_event("watch_started", 0, summary={})]]),
+            StdoutSink(io.StringIO()),
+            Changelog(tmp_path, TARGET.key),
+            StatusOutput("test: ", io.StringIO()),
+            clock=Ticks(),
+        )
+        assert watcher.run() == 0
+        assert restored == [signal.SIG_DFL, signal.SIG_DFL]
+    finally:
+        for sig, handler in saved.items():
+            original(sig, handler)
