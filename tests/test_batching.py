@@ -134,7 +134,7 @@ def test_a_poll_waits_until_the_scarcer_dimension_has_its_cost(clock: Clock) -> 
     world = world_of("a")
     world.readings = {"complexity": {"remaining": 3600, "reset_at": now + 3600}}
     # The response says the call cost 120 points, not the 10 estimated: the bucket goes 20 into debt.
-    world.actual_cost = {"complexity": 120}
+    world.actual_cost = {"requests": 1, "complexity": 120}
     source = FakeSource(world)
     engine = Engine(source, clock=clock)
 
@@ -144,6 +144,8 @@ def test_a_poll_waits_until_the_scarcer_dimension_has_its_cost(clock: Clock) -> 
         complexity = engine.accounts[""].budget.dimension("complexity")
         assert complexity.tokens == pytest.approx(-20)
         assert complexity.spent == pytest.approx(120)
+        # The estimate was given back: the account paid what the poll spent, not both.
+        assert engine.accounts[""].budget.dimension("requests").spent == pytest.approx(1)
         clock.advance(20)
         engine.poll("client", {})
         await engine.poll_due_once()

@@ -161,8 +161,7 @@ class FakeSource(Source[Snapshot]):
         for dim, reading in world.readings.items():
             ctx.budget.observe(dim, now, remaining=reading.get("remaining"), reset_at=reading.get("reset_at"))
         if self.world.actual_cost is not None:
-            estimate = self.cost(batch)
-            ctx.charge({dim: amount - estimate.get(dim, 0.0) for dim, amount in self.world.actual_cost.items()})
+            ctx.spend(self.world.actual_cost)
         if world.rate_limited is not None:
             raise RateLimited("slow down", world.rate_limited)
         if world.failing is not None:

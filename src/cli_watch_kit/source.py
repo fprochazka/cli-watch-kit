@@ -146,9 +146,12 @@ class PollOutcome[S]:
 class PollContext:
     """What a poll gets from the engine besides its targets.
 
-    `budget` is the account's: call :meth:`Budget.observe` with the rate-limit readings of each response, and
-    :meth:`charge` when a response says it cost more (or less) than :meth:`Source.cost` estimated. `cache` is shared by
-    the whole daemon; put the version of the value into its key, so a hit is never stale.
+    `budget` is the account's: call :meth:`Budget.observe` with the rate-limit readings of each response.
+
+    The engine charges the account :meth:`Source.cost` before the call. A source that knows what each response really
+    cost (an ETag 304 at a tenth of a request, a complexity header) calls :meth:`spend` with it, as often as it sends
+    requests; the engine then gives the estimate back after the call, so the account pays what was spent. `cache` is
+    shared by the whole daemon; put the version of the value into its key, so a hit is never stale.
     """
 
     account: str
@@ -156,9 +159,16 @@ class PollContext:
     budget: Budget
     cache: ByteBoundedCache[Any]
     clock: Callable[[], float] = time.time
+    estimate: Mapping[str, float] = field(default_factory=dict)
+    """What the engine charged before the call."""
+    spent: dict[str, float] = field(default_factory=dict)
+    """What :meth:`spend` charged so far."""
 
-    def charge(self, cost: Mapping[str, float]) -> None:
+    def spend(self, cost: Mapping[str, float]) -> None:
+        """Charge what a request really cost. Once a poll spent anything, the estimate is refunded after it."""
         self.budget.charge(cost, self.clock())
+        for dim, amount in cost.items():
+            self.spent[dim] = self.spent.get(dim, 0.0) + amount
 
 
 @dataclass

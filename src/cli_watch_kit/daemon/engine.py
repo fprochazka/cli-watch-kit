@@ -311,15 +311,19 @@ class Engine:
         """The resource of `target` in `account`, when some watcher holds it."""
         return self.resources.get(self._rid(account, target))
 
-    async def await_budget(self, account: str, cost: Mapping[str, float], timeout: float = 600.0) -> None:
+    async def await_budget(
+        self, account: str, cost: Mapping[str, float], timeout: float = 600.0, *, charge: bool = True
+    ) -> None:
         """Wait until the account's budget has `cost`, then charge it, so an on-demand fetch stays as gentle as the
-        polls. Raises `TimeoutError` after `timeout` seconds."""
+        polls. With `charge=False` only wait: for an op whose client charges each request itself. Raises
+        `TimeoutError` after `timeout` seconds."""
         budget = self.account(account).budget
         deadline = time.monotonic() + timeout
         while True:
             now = self.clock()
             if budget.can_spend(cost, now):
-                budget.charge(cost, now)
+                if charge:
+                    budget.charge(cost, now)
                 return
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"the budget of account {account!r} had no room within {timeout:.0f} s")
@@ -519,9 +523,11 @@ class Engine:
             return None
         return (res.account, res.batch_key)
 
-    async def _poll(self, account_name: str, chunk: list[Resource], items: list[PollItem[Any]]) -> None:
+    async def _poll(
+        self, account_name: str, chunk: list[Resource], items: list[PollItem[Any]], cost: Mapping[str, float]
+    ) -> None:
         account = self.account(account_name)
-        ctx = PollContext(account_name, account.params, account.budget, self.cache, self.clock)
+        ctx = PollContext(account_name, account.params, account.budget, self.cache, self.clock, dict(cost))
         outcomes: Mapping[str, PollOutcome[Any]] = {}
         try:
             outcomes = await self.source.poll(items, ctx)
@@ -533,6 +539,8 @@ class Engine:
             outcomes = {item.key: PollOutcome(error=error) for item in items}
         finally:
             account.inflight -= 1
+            if ctx.spent:
+                account.budget.charge({dim: -amount for dim, amount in ctx.estimate.items()}, self.clock())
         now = self.clock()
         limited = next((o.error for o in outcomes.values() if isinstance(o.error, RateLimited)), None)
         if limited is not None:
@@ -627,7 +635,7 @@ class Engine:
                 for res in chunk:
                     self.scheduler.mark_served(res.rid, now)
                     res.polling = True
-                task = asyncio.create_task(self._poll(account_name, chunk, items))
+                task = asyncio.create_task(self._poll(account_name, chunk, items, cost))
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
         next_due = self.scheduler.next_due()
