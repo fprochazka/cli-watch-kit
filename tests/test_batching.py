@@ -244,3 +244,20 @@ def test_a_new_window_brings_the_waiting_targets_forward(clock: Clock) -> None:
         assert engine.scheduler.due_at("item a") == pytest.approx(now + 10)
 
     asyncio.run(scenario())
+
+
+def test_a_batch_blocked_by_the_budget_lets_the_loop_sleep_until_the_budget_covers_it(clock: Clock) -> None:
+    world = world_of(*[str(i) for i in range(20)])
+    engine = Engine(FakeSource(world, batching=True, cap={"complexity": 100}), clock=clock)
+
+    async def scenario() -> None:
+        for i in range(20):
+            await engine.subscribe("client", item(str(i)), KINDS)
+        await engine.poll_due_once()
+        engine.accounts[""].budget.charge({"complexity": 1000}, clock())
+        clock.advance(10)
+        # Everything is due, but the points come back only in about 2 s: the loop sleeps, it does not spin.
+        assert engine._start_due(clock()) == pytest.approx(1.0)
+        assert len(engine._tasks) == 0
+
+    asyncio.run(scenario())

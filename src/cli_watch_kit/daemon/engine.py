@@ -710,8 +710,13 @@ class Engine:
         return float(min(self._interval(res) * (2 ** min(res.failures, 8)), MAX_ERROR_BACKOFF))
 
     def _start_due(self, now: float) -> float:
-        """Start every due batch the budgets allow. Return seconds until the loop should look again."""
+        """Start every due batch the budgets allow. Return seconds until the loop should look again.
+
+        A due batch that waits for its account's budget sets the wait to when the budget covers it; one that waits
+        for a free slot is started when a running poll ends and wakes the loop. Neither makes the loop spin.
+        """
         wait = 1.0
+        waiting: set[str] = set()
         for keys in self.scheduler.ready_batches(now, self._group_of, self.source.coalesce_window):
             batch: list[Resource] = []
             for key in keys:
@@ -734,7 +739,8 @@ class Engine:
                 continue
             for chunk in chunks:
                 if account.inflight >= self.source.max_inflight:
-                    break
+                    waiting.update(r.rid for r in chunk)
+                    continue
                 items = [self._item(r) for r in chunk]
                 try:
                     cost = self.source.cost(items)
@@ -746,6 +752,7 @@ class Engine:
                     continue
                 if not account.budget.can_spend(cost, now):
                     wait = min(wait, max(0.05, account.budget.wait_time(cost, now)))
+                    waiting.update(r.rid for r in chunk)
                     continue
                 account.budget.charge(cost, now)
                 account.inflight += 1
@@ -758,7 +765,7 @@ class Engine:
                 task = asyncio.create_task(self._poll(account_name, chunk, items, cost))
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
-        next_due = self.scheduler.next_due()
+        next_due = self.scheduler.next_due(waiting)
         if next_due is not None:
             wait = min(wait, max(0.05, next_due - now))
         return wait

@@ -11,7 +11,7 @@ batch's time, so the schedules of one group converge and stay aligned.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Hashable
+from collections.abc import Callable, Container, Hashable
 from dataclasses import dataclass
 
 
@@ -43,8 +43,9 @@ class Scheduler:
         entry = self._entries.get(key)
         return entry.due if entry else None
 
-    def next_due(self) -> float | None:
-        return min((e.due for e in self._entries.values()), default=None)
+    def next_due(self, exclude: Container[str] = ()) -> float | None:
+        """The earliest due time, leaving out `exclude` (keys that are due but wait for something else)."""
+        return min((e.due for k, e in self._entries.items() if k not in exclude), default=None)
 
     def ready(self, now: float) -> list[str]:
         """Due keys in serving order: urgent first, then least recently served, then earliest due."""
