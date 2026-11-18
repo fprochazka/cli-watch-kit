@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import signal
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
@@ -352,3 +355,33 @@ def test_a_second_watcher_of_the_same_resource_dir_is_refused(
         assert "another watcher already watches item a into" in capsys.readouterr().err
     assert not (tmp_path / "item" / "a" / "events.jsonl").exists()
     assert cli.run_watch(app, TARGET, options) == 0
+
+
+class StuckSink(StdoutSink):
+    """A sink whose reader stopped reading: every write blocks."""
+
+    name = "stuck"
+
+    def emit(self, events: Any) -> None:
+        threading.Event().wait(30)
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGTERM") or os.name == "nt", reason="sends itself SIGTERM")
+def test_a_stop_signal_ends_a_watch_whose_writes_block(tmp_path: Path) -> None:
+    before = signal.getsignal(signal.SIGTERM)
+    changelog = Changelog(tmp_path, TARGET.key)
+    watcher = Watcher(
+        WatchSettings(TARGET, ALL),
+        ScriptedBackend([[daemon_event("watch_started", 0, summary={})]]),
+        StuckSink(),
+        changelog,
+        StatusOutput("test: ", io.StringIO()),
+        clock=Ticks(),
+    )
+    threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGTERM)).start()
+    started = time.monotonic()
+    assert watcher.run() == 0
+    assert time.monotonic() - started < 5
+    ended = json.loads(changelog.events_path.read_text().splitlines()[-1])
+    assert ended["kind"] == "watch_ended" and ended["data"]["reason"] == "signal SIGTERM"
+    assert signal.getsignal(signal.SIGTERM) == before

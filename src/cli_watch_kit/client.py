@@ -14,7 +14,9 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import os
 import signal
+import sys
 import threading
 import time
 import uuid
@@ -50,6 +52,10 @@ RETRYABLE_REASONS = frozenset({"error", "rate_limited"})
 """Reasons of a refused subscription that may pass by themselves: the source could not reach its API."""
 EXIT_OK = 0
 EXIT_ERROR = 1
+
+
+class _Interrupted(Exception):
+    """Raised by the signal handler out of a write that blocks, so a stop is not stuck behind it."""
 
 
 class BackendError(RuntimeError):
@@ -339,6 +345,7 @@ class Watcher:
         """The first and the longest wait between attempts to subscribe again."""
         self.client_id = uuid.uuid4().hex
         self._stop_reason: str | None = None
+        self._emitting = False
         self._wakeup = threading.Event()
         self._subscription: str | None = None
         # The daemon's sequence number of the last event received. It restarts when the daemon restarts, so it is
@@ -360,6 +367,9 @@ class Watcher:
 
         def handler(signum: int, frame: FrameType | None) -> None:
             self.request_stop(f"signal {signal.Signals(signum).name}")
+            if self._emitting:
+                # A write to a reader that stopped reading (a full pipe) would block the stop forever.
+                raise _Interrupted
 
         return {sig: signal.signal(sig, handler) for sig in (signal.SIGTERM, signal.SIGINT)}
 
@@ -415,7 +425,11 @@ class Watcher:
         if not events:
             return
         self.changelog.append(events)
-        self.sink.emit(events)
+        self._emitting = True
+        try:
+            self.sink.emit(events)
+        finally:
+            self._emitting = False
 
     def _finish(self, event: Event) -> None:
         self._deliver([event])
@@ -506,6 +520,16 @@ class Watcher:
                     self._finish(self._end_event("idle", idle_after=format_duration(s.idle_after or 0.0)))
                     return EXIT_OK
                 self._wakeup.wait(self._wait(response, deadline, idle))
+        except _Interrupted:
+            # The sink is stuck, so the end goes only into the changelog.
+            event = self._end_event(self._stop_reason or "stopped")
+            self.changelog.append([event])
+            self.status.line(f"ended: {event.data.get('reason')} (the event stream did not take events any more)")
+            if self.sink.name == "stdout":
+                # Python flushes stdout at exit; without this that flush would block on the same full pipe.
+                with contextlib.suppress(OSError, ValueError):
+                    os.set_blocking(sys.stdout.fileno(), False)
+            return EXIT_OK
         except (BackendError, DaemonMismatch, DaemonUnavailable, TimeoutError) as exc:
             if self._stop_reason is not None:
                 # Stopped while a request was in flight, and the daemon is gone: end like any other stop.
@@ -518,9 +542,12 @@ class Watcher:
             if self._subscription is not None:
                 with contextlib.suppress(BackendError, DaemonUnavailable, OSError, TimeoutError):
                     self.backend.unsubscribe(self.client_id, self._subscription)
-            self.sink.close()
-            for sig, previous in previous_handlers.items():
-                signal.signal(sig, previous)
+            try:
+                self.sink.close()
+            finally:
+                for sig, previous in previous_handlers.items():
+                    # `None` means a handler not installed from Python; the default is the closest one to put back.
+                    signal.signal(sig, previous if previous is not None else signal.SIG_DFL)
 
     def _wait(self, response: Mapping[str, Any], deadline: float | None, idle: IdleTimer) -> float:
         now = self.clock()
