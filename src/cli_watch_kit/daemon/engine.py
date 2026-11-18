@@ -228,7 +228,18 @@ class Engine:
                 sub.private.extend(self._gap_events(res, baseline, sub.events))
         if res.end_event is not None:
             sub.private.append(res.end_event)
-        self._recompute_wants(res)
+        wants = (res.events, res.options)
+        try:
+            self._recompute_wants(res)
+        except Exception:
+            # The source's children() failed: take the subscription back, so no orphan keeps the resource alive.
+            self.subscriptions.pop(sub.id, None)
+            res.subscriptions.discard(sub.id)
+            res.events, res.options = wants
+            if not self.subscriptions:
+                self._idle_since = self.clock()
+            self._release(res)
+            raise
         log.info("subscribe %s account=%r client=%s sub=%s", target.key, account_name, client_id[:8], sub.id[:8])
         self._kick()
         return {"subscription_id": sub.id, "cursor": cursor}

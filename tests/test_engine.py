@@ -10,7 +10,8 @@ import pytest
 from cli_watch_kit.daemon.engine import Engine, EngineError
 from cli_watch_kit.daemon.scheduler import Scheduler
 from cli_watch_kit.daemon.server import handle
-from cli_watch_kit.source import PollItem, Target, Unauthorized
+from cli_watch_kit.events import LIFECYCLE_KINDS
+from cli_watch_kit.source import PollItem, Target, Unauthorized, Wants
 from conftest import Clock
 from fakeapp.source import FakeSource, World
 
@@ -527,5 +528,36 @@ def test_a_404_right_after_a_restart_degrades_a_seeded_watch_instead_of_ending_i
         events = events_of(engine.poll("client", {sub["subscription_id"]: 0}), sub["subscription_id"])
         assert [(e["kind"], e["data"].get("reason")) for e in events] == [("watch_degraded", "not_found")]
         assert not engine.resources[ITEM.key].ended
+
+    run(scenario())
+
+
+class ChildlessSource(FakeSource):
+    """A source whose children() can be made to raise."""
+
+    broken = False
+
+    def children(
+        self, target: Target, snapshot: dict[str, Any], item: PollItem[dict[str, Any]]
+    ) -> Mapping[Target, frozenset[str] | Wants]:
+        if self.broken:
+            raise RuntimeError("a bug in children()")
+        return super().children(target, snapshot, item)
+
+
+def test_a_subscribe_whose_children_fail_leaves_no_orphan_behind(clock: Clock) -> None:
+    source = ChildlessSource(World(items={"a": {}}, boxes={"x": ["a"]}))
+    engine = Engine(source, clock=clock)
+    box = Target("box", "x")
+
+    async def scenario() -> None:
+        await engine.subscribe("A", box, frozenset({"box_changed"}))
+        await engine.poll_due_once()
+        source.broken = True
+        with pytest.raises(RuntimeError, match="a bug in children"):
+            await engine.subscribe("B", box, frozenset({"status_changed"}))
+        assert [s.client_id for s in engine.subscriptions.values()] == ["A"]
+        assert engine.resources["box x"].subscriptions == {next(iter(engine.subscriptions))}
+        assert engine.resources["box x"].events == frozenset({"box_changed", *LIFECYCLE_KINDS})
 
     run(scenario())
