@@ -43,6 +43,7 @@ from cli_watch_kit.events import (
     utc_now_iso,
 )
 from cli_watch_kit.source import (
+    _CURRENT_POLL,
     NotFound,
     Params,
     PollContext,
@@ -530,6 +531,8 @@ class Engine:
         account = self.account(account_name)
         ctx = PollContext(account_name, account.params, account.budget, self.cache, self.clock, dict(cost))
         outcomes: Mapping[str, PollOutcome[Any]] = {}
+        # Each poll runs in a task of its own, so this binding is private to the poll.
+        _CURRENT_POLL.set(ctx)
         try:
             outcomes = await self.source.poll(items, ctx)
         except SourceError as exc:

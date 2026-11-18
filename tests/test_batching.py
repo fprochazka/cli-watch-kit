@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping, Sequence
 
 import pytest
 
 from cli_watch_kit.daemon.engine import Engine
-from cli_watch_kit.source import Target
+from cli_watch_kit.source import PollContext, PollItem, PollOutcome, Target
 from conftest import Clock
-from fakeapp.source import FakeSource, World
+from fakeapp.source import FakeSource, Snapshot, World
 
 KINDS = frozenset({"status_changed", "note_added"})
 
@@ -180,3 +181,33 @@ def test_a_rate_limit_blocks_the_whole_account(clock: Clock) -> None:
         assert sorted(k for call in source.calls[1:] for k in call.keys) == ["item a", "item b"]
 
     asyncio.run(scenario())
+
+
+class SharedClientSource(FakeSource):
+    """Charges each request through `PollContext.current()`, like an API client shared by the polls of an account."""
+
+    async def poll(self, batch: Sequence[PollItem[Snapshot]], ctx: PollContext) -> Mapping[str, PollOutcome[Snapshot]]:
+        await asyncio.sleep(0)
+        current = PollContext.current()
+        assert current is ctx
+        current.spend({"requests": 0.1, "complexity": 1.0})
+        await asyncio.sleep(0)
+        return await super().poll(batch, ctx)
+
+
+def test_concurrent_polls_each_charge_their_own_requests_through_the_current_context(clock: Clock) -> None:
+    source = SharedClientSource(world_of("a", "b"))
+    engine = Engine(source, clock=clock)
+
+    async def scenario() -> None:
+        await engine.subscribe("client", item("a"), KINDS)
+        await engine.subscribe("client", item("b"), KINDS)
+        await engine.poll_due_once()
+        assert len(source.calls) == 2
+        budget = engine.accounts[""].budget
+        # Both estimates (1 request, 10 points each) were given back: only what the requests cost remains.
+        assert budget.dimension("requests").spent == pytest.approx(0.2)
+        assert budget.dimension("complexity").spent == pytest.approx(2.0)
+
+    asyncio.run(scenario())
+    assert PollContext.current() is None

@@ -18,6 +18,7 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Hashable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -169,6 +170,17 @@ class PollContext:
         self.budget.charge(cost, self.clock())
         for dim, amount in cost.items():
             self.spent[dim] = self.spent.get(dim, 0.0) + amount
+
+    @staticmethod
+    def current() -> PollContext | None:
+        """The context of the poll the calling task runs in, or `None` outside a poll (in an extra op, say).
+
+        For an API client the source shares between the polls of an account, which can then charge each request to
+        the poll that sent it without the context being passed down to it. Concurrent polls each see their own."""
+        return _CURRENT_POLL.get()
+
+
+_CURRENT_POLL: ContextVar[PollContext | None] = ContextVar("cli_watch_kit_current_poll", default=None)
 
 
 @dataclass
