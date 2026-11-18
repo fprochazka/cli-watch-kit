@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -362,6 +363,17 @@ def test_a_second_watcher_of_the_same_resource_dir_is_refused(
         assert "another watcher already watches item a into" in capsys.readouterr().err
     assert not (tmp_path / "item" / "a" / "events.jsonl").exists()
     assert cli.run_watch(app, TARGET, options) == 0
+
+
+def test_a_stdout_watcher_under_a_session_writes_into_its_scratchpad(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "default_backend", lambda app, no_daemon: ScriptedBackend([]))
+    monkeypatch.setattr(cli, "find_session", lambda: SimpleNamespace(scratchpad_dir=tmp_path / "scratchpad"))
+    app = WatchApp("inproc", FakeSource(), "unused.daemon", 1, "0", "inproc: ", "inproc-watcher")
+    monkeypatch.delenv(app.paths.base_dir_env, raising=False)
+    assert cli.run_watch(app, TARGET, WatchOptions(timeout="1s", events_stream="stdout")) == 0
+    assert (tmp_path / "scratchpad" / "inproc" / "item" / "a" / "events.jsonl").is_file()
 
 
 class StuckSink(StdoutSink):

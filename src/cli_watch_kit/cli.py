@@ -194,7 +194,8 @@ def run_watch(
             raise _Usage(f"a {target.kind} watch never produces {unknown}, so it cannot also subscribe to it")
         timeout = _duration("--timeout", options.timeout)
         idle_after = _duration("--idle-after", options.idle_after)
-        session = find_session() if options.events_stream != "stdout" else None
+        # The files go to the session's scratchpad whatever the stream, so the agent finds them next to its others.
+        session = find_session()
         scratchpad = getattr(session, "scratchpad_dir", None) if session is not None else None
         base = app.paths.base_dir(options.base_dir, scratchpad)
         changelog = Changelog(resource_dir(base, target), target.key, readme)
