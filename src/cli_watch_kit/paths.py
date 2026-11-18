@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -22,11 +23,34 @@ def sanitize_part(value: str) -> str:
 
 
 def ensure_private_dir(path: Path) -> Path:
-    """Create `path` and make it readable by the user only."""
+    """Create `path` and make it readable by the user only.
+
+    A dir in a shared place such as `/tmp` may have been created by someone else first, or be a symlink to their dir;
+    such a dir is refused, because the daemon's socket and log, and the watchers' files, would then be theirs to read
+    or replace.
+    """
     path.mkdir(parents=True, exist_ok=True)
     if os.name != "nt":
+        # Ours, then made private: the mode a fresh dir gets from the umask is no reason to refuse it.
+        check_owned(path, directory=True, modes=False)
         os.chmod(path, 0o700)
     return path
+
+
+def check_owned(path: Path, *, directory: bool = False, private: bool = False, modes: bool = True) -> None:
+    """Raise `PermissionError` unless `path` belongs to this user, is no symlink, and (with `modes`) nobody else may
+    write it, or with `private` read it either. Does nothing on Windows, where the profile dir protects the files."""
+    if os.name == "nt":
+        return
+    info = os.lstat(path)
+    if stat.S_ISLNK(info.st_mode) or (directory and not stat.S_ISDIR(info.st_mode)):
+        raise PermissionError(f"{path} is a symlink or not a {'dir' if directory else 'file'}; refusing to use it")
+    if info.st_uid != os.getuid():
+        raise PermissionError(f"{path} belongs to another user; refusing to use it")
+    if modes and info.st_mode & (0o077 if private else 0o022):
+        raise PermissionError(
+            f"{path} is open to other users (mode {stat.S_IMODE(info.st_mode):o}); refusing to use it"
+        )
 
 
 def uid_suffix() -> str:

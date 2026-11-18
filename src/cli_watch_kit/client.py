@@ -32,6 +32,7 @@ from cli_watch_kit.daemon.server import handle
 from cli_watch_kit.daemon.transport import (
     DaemonFiles,
     DaemonMismatch,
+    DaemonNotTrusted,
     DaemonStartFailed,
     DaemonTimeout,
     DaemonUnavailable,
@@ -130,14 +131,21 @@ class DaemonBackend:
         return f"pid {self.hello.get('pid')}, endpoint {self.files.describe_endpoint()}, log {self.files.log}"
 
     def _call(self, payload: dict[str, Any], timeout: float = 10.0) -> dict[str, Any]:
+        secret = bool(payload.get("params"))
         try:
+            if secret:
+                self.files.check_trusted()
             response = request(self.files, payload, timeout=timeout)
+        except DaemonNotTrusted:
+            raise
         except DaemonUnavailable:
             if self._shutting_down:
                 raise
             # The daemon exited (idle, crash, drained or stopped by hand). Start a new one; subscriptions then come
             # back as unknown and the watcher subscribes again.
             self.hello = ensure_daemon(self.app, self.files)
+            if secret:
+                self.files.check_trusted()
             response = request(self.files, payload, timeout=timeout)
         error = str(response.get("error", ""))
         if not response.get("ok") and error.startswith("unknown op"):
@@ -378,7 +386,7 @@ class Watcher:
                 if exc.reason not in RETRYABLE_REASONS:
                     raise
                 error: Exception = exc
-            except DaemonStartFailed:
+            except (DaemonStartFailed, DaemonNotTrusted):
                 raise
             except (DaemonUnavailable, TimeoutError) as exc:
                 error = exc

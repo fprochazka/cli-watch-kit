@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -202,6 +203,11 @@ def test_params_reach_the_source_over_the_socket_and_never_show_in_the_status(da
     status = daemon_request(daemon_env.files, {"op": "status"})
     assert "someone" in status["accounts"] and "secret-token-1" not in json.dumps(status)
     assert "secret-token-1" not in daemon_env.files.log.read_text()
+    files = daemon_env.files
+    assert stat.S_IMODE(files.state_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(files.log.stat().st_mode) == 0o600
+    endpoint = files.endpoint if files.use_tcp else files.socket
+    assert stat.S_IMODE(endpoint.stat().st_mode) == 0o600
     echoed = daemon_request(
         daemon_env.files, {"op": "echo", "target": Target("item", "a").to_wire(), "params": {"user": "someone"}}
     )

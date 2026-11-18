@@ -208,7 +208,10 @@ def spawn_daemon(app: WatchApp, files: DaemonFiles) -> subprocess.Popen[bytes]:
     """Start a detached daemon process with its output in the log file."""
     ensure_private_dir(files.state_dir)
     _rotate_log(files)
-    with open(files.log, "ab") as log_file:
+    fd = os.open(files.log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    if os.name != "nt":
+        os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "ab") as log_file:
         kwargs: dict[str, Any] = {
             "stdin": subprocess.DEVNULL,
             "stdout": log_file,
@@ -286,11 +289,7 @@ def _last_log_line(files: DaemonFiles) -> str:
 
 def daemon_running(files: DaemonFiles) -> bool:
     """Whether a daemon process holds the lock, answering or not."""
-    probe = FileLock(files.lock)
-    if probe.try_acquire():
-        probe.release()
-        return False
-    return True
+    return files.lock_held()
 
 
 def stop_daemon(files: DaemonFiles, timeout: float = 10.0) -> bool:

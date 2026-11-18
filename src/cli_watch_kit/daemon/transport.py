@@ -24,7 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from cli_watch_kit.paths import ensure_private_dir
+from cli_watch_kit.locks import FileLock
+from cli_watch_kit.paths import check_owned, ensure_private_dir
 
 if TYPE_CHECKING:
     from cli_watch_kit.app import WatchApp
@@ -49,6 +50,10 @@ class DaemonTimeout(TimeoutError):
 
 class DaemonStartFailed(DaemonUnavailable):
     """A daemon was started but failed before it listened; trying again would fail the same way."""
+
+
+class DaemonNotTrusted(DaemonUnavailable):
+    """The daemon's files do not belong to this user alone, so secrets must not be sent to whatever listens there."""
 
 
 class DaemonMismatch(RuntimeError):
@@ -116,6 +121,30 @@ class DaemonFiles:
 
     def describe_endpoint(self) -> str:
         return str(self.endpoint if self.use_tcp else self.socket)
+
+    def check_trusted(self) -> None:
+        """Raise :class:`DaemonNotTrusted` unless the state dir and the endpoint belong to this user and nobody else
+        can write them. Checked before a request that carries params."""
+        try:
+            check_owned(self.state_dir, directory=True, private=True)
+            if self.use_tcp:
+                check_owned(self.endpoint, private=True)
+            elif os.name != "nt":
+                info = os.lstat(self.socket)
+                if info.st_uid != os.getuid():
+                    raise PermissionError(f"{self.socket} belongs to another user")
+        except FileNotFoundError as exc:
+            raise DaemonUnavailable(str(exc)) from exc
+        except PermissionError as exc:
+            raise DaemonNotTrusted(f"not sending secrets to the daemon: {exc}") from exc
+
+    def lock_held(self) -> bool:
+        """Whether a daemon process holds the lock, answering or not."""
+        probe = FileLock(self.lock)
+        if probe.try_acquire():
+            probe.release()
+            return False
+        return True
 
     def check_socket_path(self) -> None:
         """Fail with a clear message when the socket path is too long for a Unix socket. Without this, the daemon
@@ -227,6 +256,9 @@ def _connect(files: DaemonFiles, timeout: float) -> tuple[socket.socket, str | N
             port, token = int(endpoint["port"]), str(endpoint["token"])
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise DaemonUnavailable(f"no daemon endpoint in {files.endpoint}") from exc
+        if not files.lock_held():
+            # The port of a daemon that is gone may belong to anyone now; never send them the token.
+            raise DaemonUnavailable(f"the endpoint in {files.endpoint} is stale: no daemon holds {files.lock}")
         try:
             return socket.create_connection(("127.0.0.1", port), timeout=timeout), token
         except OSError as exc:
