@@ -120,6 +120,7 @@ class FakeSource(Source[Snapshot]):
         complexity_per_item: float = 10.0,
         cap: Mapping[str, float] | None = None,
         coalesce_window: float = 5.0,
+        baseline_wait: float | None = 0.0,
         default_interval: float = 10.0,
         log_path: Path | None = None,
     ) -> None:
@@ -128,6 +129,7 @@ class FakeSource(Source[Snapshot]):
         self.complexity_per_item = complexity_per_item
         self.batch_cost_cap = cap
         self.coalesce_window = coalesce_window
+        self.baseline_wait = baseline_wait
         self.default_interval = default_interval
         self.calls: list[Call] = []
         self.log_path = log_path

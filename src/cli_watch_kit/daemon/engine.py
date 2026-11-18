@@ -388,7 +388,11 @@ class Engine:
         if res is None:
             res = Resource(rid, account, target, self.source.batch_key(target))
             self.resources[rid] = res
-            self.scheduler.schedule(rid, self.clock(), urgent=True)
+            wait = 0.0
+            if res.batch_key is not None:
+                configured = self.source.baseline_wait
+                wait = self.source.coalesce_window if configured is None else configured
+            self.scheduler.schedule(rid, self.clock() + wait, urgent=True)
             log.info("start polling %s", rid)
         return res
 

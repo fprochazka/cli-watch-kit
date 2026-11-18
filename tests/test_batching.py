@@ -261,3 +261,25 @@ def test_a_batch_blocked_by_the_budget_lets_the_loop_sleep_until_the_budget_cove
         assert len(engine._tasks) == 0
 
     asyncio.run(scenario())
+
+
+def test_first_polls_of_targets_subscribed_seconds_apart_share_one_call(clock: Clock) -> None:
+    source = FakeSource(world_of("a", "b", "c", "d"), batching=True, baseline_wait=None)
+    engine = Engine(source, clock=clock)
+
+    async def scenario() -> None:
+        for ident in "abc":
+            await engine.subscribe("client-" + ident, item(ident), KINDS)
+            await engine.poll_due_once()
+            clock.advance(1)
+        assert source.calls == []
+        clock.advance(2)
+        await engine.poll_due_once()
+        assert [sorted(call.keys) for call in source.calls] == [["item a", "item b", "item c"]]
+        # A target without a batch key still polls at once.
+        source.batching = False
+        await engine.subscribe("client-d", item("d"), KINDS)
+        await engine.poll_due_once()
+        assert source.calls[-1].keys == ["item d"]
+
+    asyncio.run(scenario())

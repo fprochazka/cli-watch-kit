@@ -209,6 +209,9 @@ class Source[S](ABC):
     """The most one poll call may cost per dimension. Batches above it are split; one target above it polls alone."""
     coalesce_window: float = 5.0
     """A target due within this many seconds joins a batch that polls now, so close schedules merge."""
+    baseline_wait: float | None = None
+    """How long the first poll of a new target with a batch key waits, so the targets that watchers subscribe to
+    within a few seconds of each other share one call. `None` waits the `coalesce_window`; 0 polls at once."""
     max_inflight: int = 4
     """Concurrent poll calls per account."""
     ops: Mapping[str, OpHandler] = {}
