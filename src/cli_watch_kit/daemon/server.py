@@ -106,3 +106,7 @@ async def handle(
         return {"ok": False, "error": str(exc)}
     except SourceError as exc:
         return {"ok": False, "error": str(exc) or type(exc).__name__, "reason": exc.reason}
+    except Exception as exc:
+        # A bug in the daemon or in the source's code: answer, so the watcher does not take it for a dead daemon.
+        log.exception("the %r request failed", op)
+        return {"ok": False, "error": f"the daemon failed: {type(exc).__name__}: {exc}"}

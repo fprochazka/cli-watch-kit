@@ -136,6 +136,8 @@ class FakeSource(Source[Snapshot]):
     async def account(self, target: Target, params: Params) -> str:
         if params.get("token") == "bad":
             raise Unauthorized("the token was refused")
+        if params.get("user") == "boom":
+            raise KeyError("a bug in account()")
         return str(params.get("user", ""))
 
     def batch_key(self, target: Target) -> Hashable | None:

@@ -9,6 +9,7 @@ import pytest
 
 from cli_watch_kit.daemon.engine import Engine, EngineError
 from cli_watch_kit.daemon.scheduler import Scheduler
+from cli_watch_kit.daemon.server import handle
 from cli_watch_kit.source import PollItem, Target, Unauthorized
 from conftest import Clock
 from fakeapp.source import FakeSource, World
@@ -481,3 +482,18 @@ def test_a_watcher_whose_lease_expired_gets_the_gap_when_it_comes_back(clock: Cl
 def test_leases_run_on_a_monotonic_clock_by_default() -> None:
     engine = Engine(FakeSource(World()))
     assert engine.lease_clock is time.monotonic
+
+
+def test_a_bug_in_a_request_is_answered_and_logged(clock: Clock, caplog: pytest.LogCaptureFixture) -> None:
+    engine = Engine(FakeSource(World(items={"a": {}})), clock=clock)
+    request = {
+        "op": "subscribe",
+        "client_id": "c",
+        "target": ITEM.to_wire(),
+        "options": {"events": ["status_changed"]},
+        "params": {"user": "boom", "token": "a-secret-token"},
+    }
+    response = run(handle(engine, request, asyncio.Event(), {}))
+    assert response == {"ok": False, "error": "the daemon failed: KeyError: 'a bug in account()'"}
+    assert "the 'subscribe' request failed" in caplog.text and "KeyError" in caplog.text
+    assert "a-secret-token" not in caplog.text

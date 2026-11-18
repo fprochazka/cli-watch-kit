@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import socket
@@ -27,6 +28,8 @@ from cli_watch_kit.paths import ensure_private_dir
 
 if TYPE_CHECKING:
     from cli_watch_kit.app import WatchApp
+
+log = logging.getLogger(__name__)
 
 SHUTDOWN_GRACE = 1.0
 """Seconds a stopping daemon gives the requests in flight before it cuts their connections."""
@@ -183,6 +186,8 @@ async def start_server(files: DaemonFiles, handler: Handler) -> Listener:
             await writer.drain()
         except (TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, ValueError, OSError):
             pass
+        except Exception:
+            log.exception("a daemon connection failed")
         finally:
             writer.close()
             with contextlib.suppress(OSError, ConnectionError):
