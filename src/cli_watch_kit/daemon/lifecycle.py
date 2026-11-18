@@ -31,7 +31,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from cli_watch_kit.app import WatchApp
-from cli_watch_kit.daemon.engine import DEFAULT_CLIENT_POLL_MS, DEFAULT_LEASE_TIMEOUT, Engine
+from cli_watch_kit.daemon.engine import Engine
 from cli_watch_kit.daemon.server import handle
 from cli_watch_kit.daemon.transport import DaemonFiles, DaemonStartFailed, DaemonUnavailable, request, start_server
 from cli_watch_kit.locks import FileLock
@@ -42,13 +42,6 @@ log = logging.getLogger("cli_watch_kit.daemon")
 DEFAULT_IDLE_TIMEOUT = 30.0
 SPAWN_TIMEOUT = 10.0
 MAX_LOG_BYTES = 5 * 1024 * 1024
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name, default))
-    except ValueError:
-        return default
 
 
 async def serve(
@@ -162,12 +155,8 @@ def _serve_daemon(app: WatchApp, ready_fd: int | None) -> int:
             log.info("another daemon holds %s, exiting", files.lock)
             notify()
             return 0
-        engine = Engine(
-            app.make_source(),
-            lease_timeout=_env_float(app.env("LEASE_TIMEOUT"), DEFAULT_LEASE_TIMEOUT),
-            client_poll_ms=int(_env_float(app.env("CLIENT_POLL_MS"), DEFAULT_CLIENT_POLL_MS)),
-        )
-        idle_timeout = _env_float(app.env("IDLE_TIMEOUT"), DEFAULT_IDLE_TIMEOUT)
+        engine = Engine.for_app(app)
+        idle_timeout = app.env_float("IDLE_TIMEOUT", DEFAULT_IDLE_TIMEOUT)
         asyncio.run(serve(app, files, engine, idle_timeout, notify))
     except Exception:
         log.exception("the daemon failed")

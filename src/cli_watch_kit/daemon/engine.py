@@ -30,6 +30,7 @@ from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from cli_watch_kit.app import WatchApp
 from cli_watch_kit.budget import Budget
 from cli_watch_kit.daemon.cache import ByteBoundedCache
 from cli_watch_kit.daemon.scheduler import Scheduler
@@ -176,6 +177,11 @@ class Engine:
         self._tasks: set[asyncio.Task[None]] = set()
         self._wake: asyncio.Event | None = None
         self._idle_since: float | None = clock()
+
+    @classmethod
+    def for_app(cls, app: WatchApp) -> Engine:
+        """The engine of `app`, with its source and its settings (see :meth:`WatchApp.engine_settings`)."""
+        return cls(app.make_source(), **app.engine_settings())
 
     # ----------------------------------------------------------------------------------------------------------
     # Watcher-facing operations

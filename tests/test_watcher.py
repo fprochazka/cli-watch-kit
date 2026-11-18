@@ -385,3 +385,22 @@ def test_a_stop_signal_ends_a_watch_whose_writes_block(tmp_path: Path) -> None:
     ended = json.loads(changelog.events_path.read_text().splitlines()[-1])
     assert ended["kind"] == "watch_ended" and ended["data"]["reason"] == "signal SIGTERM"
     assert signal.getsignal(signal.SIGTERM) == before
+
+
+def test_both_backends_take_the_engine_settings_from_the_app_and_its_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = FakeSource(World(items={"a": {"status": "open"}}))
+    app = WatchApp("inproc", lambda: FakeSource(), "unused.daemon", 1, "0", "inproc: ", "inproc-watcher")
+    overridden = app.with_overrides(source=source, client_poll_ms=250, lease_timeout=3)
+    assert overridden.make_source() is source and app.make_source() is not source
+    assert overridden.engine_settings() == {"client_poll_ms": 250, "lease_timeout": 3}
+    monkeypatch.setenv("INPROC_CLIENT_POLL_MS", "100")
+    backend = InProcessBackend(overridden)
+    try:
+        assert backend.engine.client_poll_ms == 100 and backend.engine.lease_timeout == 3
+        assert backend.engine.source is source
+        sid, cursor = backend.subscribe("c", TARGET, frozenset({"status_changed"}), None, {}, {})
+        assert backend.poll("c", {sid: cursor}, {})["next_poll_ms"] == 100
+    finally:
+        backend.close()

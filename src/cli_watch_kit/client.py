@@ -201,7 +201,7 @@ class InProcessBackend:
 
     def __init__(self, app: WatchApp, engine: Engine | None = None) -> None:
         self.app = app
-        self.engine = engine or Engine(app.make_source())
+        self.engine = engine or Engine.for_app(app)
         self._identity = app.identity()
         self._loop = asyncio.new_event_loop()
         self._stop: asyncio.Event | None = None

@@ -6,7 +6,7 @@ import hashlib
 import importlib.util
 import os
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from pathlib import Path
 from typing import Any
@@ -36,6 +36,9 @@ class WatchApp:
     - `env_prefix`: the prefix of the override variables. Default: `name` in upper case with `_`, plus `_`.
     - `files_dir_name`: the name of the dir the watchers' files go under, in the session scratchpad or the temp
       dir (`linear-cli`). Default: `name`.
+    - `client_poll_ms`, `lease_timeout`: how often watchers poll the engine and how long a subscription lives
+      without a poll. Default: 5000 ms and 20 s. `<PREFIX>CLIENT_POLL_MS` and `<PREFIX>LEASE_TIMEOUT` override both,
+      for the daemon and for `--no-daemon` alike.
     """
 
     name: str
@@ -48,6 +51,8 @@ class WatchApp:
     command: str = ""
     env_prefix: str = ""
     files_dir_name: str = ""
+    client_poll_ms: int | None = None
+    lease_timeout: float | None = None
     _made: dict[str, Source[Any]] = field(default_factory=dict, init=False, compare=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -73,6 +78,42 @@ class WatchApp:
     def env(self, name: str) -> str:
         """The name of one of the app's environment variables."""
         return f"{self.env_prefix}{name}"
+
+    def env_float(self, name: str, default: float) -> float:
+        """The app's environment variable `name` as a number, or `default` when it is unset or not a number."""
+        try:
+            return float(os.environ.get(self.env(name), default))
+        except ValueError:
+            return default
+
+    def engine_settings(self) -> dict[str, Any]:
+        """What an engine of this app runs with, the same in the daemon and in a `--no-daemon` watcher."""
+        from cli_watch_kit.daemon.engine import DEFAULT_CLIENT_POLL_MS, DEFAULT_LEASE_TIMEOUT
+
+        poll_ms = self.client_poll_ms if self.client_poll_ms is not None else DEFAULT_CLIENT_POLL_MS
+        lease = self.lease_timeout if self.lease_timeout is not None else DEFAULT_LEASE_TIMEOUT
+        return {
+            "client_poll_ms": int(self.env_float("CLIENT_POLL_MS", poll_ms)),
+            "lease_timeout": self.env_float("LEASE_TIMEOUT", lease),
+        }
+
+    def with_overrides(
+        self,
+        *,
+        source: Source[Any] | Callable[[], Source[Any]] | None = None,
+        client_poll_ms: int | None = None,
+        lease_timeout: float | None = None,
+    ) -> WatchApp:
+        """A copy of the app with another source or engine settings, for tests and for an in-process run:
+        `run_watch(APP.with_overrides(source=FakeSource()), target, WatchOptions(no_daemon=True))`."""
+        changes: dict[str, Any] = {}
+        if source is not None:
+            changes["source"] = source
+        if client_poll_ms is not None:
+            changes["client_poll_ms"] = client_poll_ms
+        if lease_timeout is not None:
+            changes["lease_timeout"] = lease_timeout
+        return replace(self, **changes)
 
     @property
     def lib_version(self) -> str:
