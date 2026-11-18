@@ -283,3 +283,22 @@ def test_first_polls_of_targets_subscribed_seconds_apart_share_one_call(clock: C
         assert source.calls[-1].keys == ["item d"]
 
     asyncio.run(scenario())
+
+
+def test_the_cap_follows_the_window_of_the_dimension_that_is_short(clock: Clock) -> None:
+    now = clock()
+    world = world_of("a")
+    # Out of requests until the minute ends; plenty of complexity points in an hour-long window.
+    world.readings = {
+        "requests": {"remaining": 0, "reset_at": now + 60},
+        "complexity": {"remaining": 1_000_000, "reset_at": now + 3600},
+    }
+    engine = Engine(FakeSource(world), clock=clock)
+
+    async def scenario() -> None:
+        await engine.subscribe("client", item("a"), KINDS)
+        await engine.poll_due_once()
+        due = engine.scheduler.due_at("item a")
+        assert due is not None and due - now == pytest.approx(70)
+
+    asyncio.run(scenario())

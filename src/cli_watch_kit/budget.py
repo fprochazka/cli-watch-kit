@@ -178,16 +178,22 @@ class Budget:
 
     def stretch_factor(self, demand_per_second: Mapping[str, float], now: float) -> float:
         """How much every poll interval of the account must grow so the demand of each dimension fits its rate."""
-        factor = 1.0
+        return self.stretch(demand_per_second, now)[0]
+
+    def stretch(self, demand_per_second: Mapping[str, float], now: float) -> tuple[float, str | None]:
+        """:meth:`stretch_factor`, and the dimension that drives it (`None` when nothing needs stretching)."""
+        factor, driver = 1.0, None
         for name, demand in demand_per_second.items():
             rate = self.dimension(name).rate(now)
-            if demand > rate:
-                factor = max(factor, demand / rate)
-        return factor
+            if demand > rate and demand / rate > factor:
+                factor, driver = demand / rate, name
+        return factor, driver
 
-    def reset_in(self, now: float) -> float | None:
-        """Seconds until the last reported window of any dimension resets, or `None` when none is known."""
-        resets = [d.reset_at - now for d in self.dimensions.values() if d.reset_at is not None and d.reset_at > now]
+    def reset_in(self, now: float, dimension: str | None = None) -> float | None:
+        """Seconds until the reported window of `dimension` resets (of any dimension, the latest, when `None`), or
+        `None` when that is not known."""
+        dims = [self.dimension(dimension)] if dimension is not None else list(self.dimensions.values())
+        resets = [d.reset_at - now for d in dims if d.reset_at is not None and d.reset_at > now]
         return max(resets) if resets else None
 
     def windows(self) -> tuple[tuple[str, float | None], ...]:

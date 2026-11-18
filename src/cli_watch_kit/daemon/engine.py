@@ -551,7 +551,11 @@ class Engine:
         return max(res.interval, MIN_INTERVAL)
 
     def _stretch(self, account: str, now: float) -> float:
-        """The factor all intervals of the account grow by so that the polls the watchers want fit the budget.
+        return self._stretch_driver(account, now)[0]
+
+    def _stretch_driver(self, account: str, now: float) -> tuple[float, str | None]:
+        """The factor all intervals of the account grow by so that the polls the watchers want fit the budget, and
+        the budget dimension that makes them grow.
 
         The demand counts one call per batch group at the group's shortest interval, which is what batching makes of
         it once the schedules align.
@@ -567,15 +571,18 @@ class Engine:
             for chunk in self._split(members):
                 for dim, amount in self.source.cost([self._item(r) for r in chunk]).items():
                     demand[dim] = demand.get(dim, 0.0) + amount / interval
-        return self.account(account).budget.stretch_factor(demand, now)
+        return self.account(account).budget.stretch(demand, now)
 
     def _stretched(self, account: str, base: float, now: float) -> float:
-        """`base` stretched under budget pressure, but never past the end of the API's window plus `base`: with
-        nothing left until the window resets, polling resumes when it does, not hours later."""
-        delay = base * self._stretch(account, now)
-        reset_in = self.account(account).budget.reset_in(now)
+        """`base` stretched under budget pressure, but never past the end of the window of the dimension that drives
+        the stretch, plus `base`: with nothing left until that window resets, polling resumes when it does, not hours
+        later. A dimension with a longer window that is not short of anything plays no part."""
+        factor, driver = self._stretch_driver(account, now)
+        if driver is None:
+            return base
+        reset_in = self.account(account).budget.reset_in(now, driver)
         cap = base + reset_in if reset_in is not None else max(base, MAX_STRETCHED_DELAY)
-        return min(delay, cap)
+        return min(base * factor, cap)
 
     def _rescale(self, account_name: str, now: float) -> None:
         """A new window began: bring forward every resource of the account that waits longer than it now has to."""
