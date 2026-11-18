@@ -20,7 +20,14 @@ from cli_watch_kit import cli
 from cli_watch_kit.app import WatchApp
 from cli_watch_kit.changelog import Changelog
 from cli_watch_kit.cli import WatchOptions
-from cli_watch_kit.client import BackendError, InProcessBackend, Watcher, WatchSettings, WriterContext
+from cli_watch_kit.client import (
+    RETRYABLE_REASONS,
+    BackendError,
+    InProcessBackend,
+    Watcher,
+    WatchSettings,
+    WriterContext,
+)
 from cli_watch_kit.events import Event
 from cli_watch_kit.locks import FileLock, LockTimeout
 from cli_watch_kit.sinks import StatusOutput, StdoutSink
@@ -404,3 +411,15 @@ def test_both_backends_take_the_engine_settings_from_the_app_and_its_environment
         assert backend.poll("c", {sid: cursor}, {})["next_poll_ms"] == 100
     finally:
         backend.close()
+
+
+def test_a_resubscribe_that_meets_a_bug_in_the_daemon_is_retried(tmp_path: Path) -> None:
+    engine_backend = InProcessBackend(
+        WatchApp("inproc", FakeSource(World(items={"a": {"status": "open"}})), "unused", 1, "0", "inproc: ", "x")
+    )
+    try:
+        with pytest.raises(BackendError) as raised:
+            engine_backend.subscribe("c", TARGET, frozenset({"status_changed"}), None, {"user": "boom"}, {})
+        assert raised.value.reason in RETRYABLE_REASONS
+    finally:
+        engine_backend.close()

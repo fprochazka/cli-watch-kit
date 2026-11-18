@@ -494,7 +494,7 @@ def test_a_bug_in_a_request_is_answered_and_logged(clock: Clock, caplog: pytest.
         "params": {"user": "boom", "token": "a-secret-token"},
     }
     response = run(handle(engine, request, asyncio.Event(), {}))
-    assert response == {"ok": False, "error": "the daemon failed: KeyError: 'a bug in account()'"}
+    assert response == {"ok": False, "error": "the daemon failed: KeyError: 'a bug in account()'", "reason": "error"}
     assert "the 'subscribe' request failed" in caplog.text and "KeyError" in caplog.text
     assert "a-secret-token" not in caplog.text
 
