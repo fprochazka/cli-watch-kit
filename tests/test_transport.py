@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -9,6 +10,7 @@ import socket
 import stat
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -16,9 +18,12 @@ import pytest
 
 from cli_watch_kit import client as client_module
 from cli_watch_kit.client import DaemonBackend
+from cli_watch_kit.daemon.engine import Engine
+from cli_watch_kit.daemon.lifecycle import serve
 from cli_watch_kit.daemon.transport import DaemonFiles, DaemonNotTrusted, DaemonTimeout, DaemonUnavailable, request
 from cli_watch_kit.paths import ensure_private_dir
 from fakeapp.app import APP
+from fakeapp.source import FakeSource
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="a Unix socket stands in for the daemon")
 
@@ -153,3 +158,17 @@ def test_a_fresh_dir_is_made_private_whatever_the_umask(tmp_path: Path) -> None:
     finally:
         os.umask(previous)
     assert stat.S_IMODE(made.stat().st_mode) == 0o700
+
+
+class DyingEngine(Engine):
+    async def run(self, stop: asyncio.Event) -> None:
+        raise RuntimeError("the engine broke")
+
+
+def test_the_daemon_exits_when_its_engine_dies(files: DaemonFiles, caplog: pytest.LogCaptureFixture) -> None:
+    engine = DyingEngine(FakeSource())
+    started = time.monotonic()
+    asyncio.run(asyncio.wait_for(serve(APP, files, engine, idle_timeout=600), 20))
+    assert time.monotonic() - started < 10
+    assert "the engine stopped (RuntimeError('the engine broke')), exiting" in caplog.text
+    assert not files.socket.exists()
