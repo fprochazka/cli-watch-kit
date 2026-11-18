@@ -57,7 +57,7 @@ class ScriptedBackend:
         self.subscriptions.append((baseline, params))
         return f"sub-{len(self.subscriptions)}", 0
 
-    def poll(self, client_id: str, cursors: dict[str, int]) -> dict[str, Any]:
+    def poll(self, client_id: str, cursors: dict[str, int], acks: dict[str, int]) -> dict[str, Any]:
         ((sid, cursor),) = cursors.items()
         self.cursors.append(cursor)
         step: Any = next(self.script, [])
@@ -203,7 +203,7 @@ def test_the_in_process_backend_runs_the_engine_and_the_ops(tmp_path: Path) -> N
         sid, cursor = backend.subscribe("c", TARGET, frozenset({"status_changed"}), None, {"user": "u"}, {})
         response: dict[str, Any] = {}
         for _ in range(200):
-            response = backend.poll("c", {sid: cursor})
+            response = backend.poll("c", {sid: cursor}, {})
             if response["events"]:
                 break
             time.sleep(0.01)
@@ -211,7 +211,7 @@ def test_the_in_process_backend_runs_the_engine_and_the_ops(tmp_path: Path) -> N
         echoed = backend.call("echo", {"target": TARGET.to_wire()}, {"user": "u"})
         assert echoed["account"] == "u" and echoed["snapshot"] == {"status": "open", "notes": 0}
         assert backend.call("stop", {})["ok"]
-        assert backend.poll("c", {sid: cursor})["ok"]
+        assert backend.poll("c", {sid: cursor}, {})["ok"]
     finally:
         backend.close()
 
@@ -269,7 +269,7 @@ def test_run_watch_subscribes_to_the_extra_kinds_without_reporting_them(
 class LockedOutBackend(ScriptedBackend):
     """A daemon that cannot be reached because another watcher holds the spawn lock for too long."""
 
-    def poll(self, client_id: str, cursors: dict[str, int]) -> dict[str, Any]:
+    def poll(self, client_id: str, cursors: dict[str, int], acks: dict[str, int]) -> dict[str, Any]:
         raise LockTimeout("could not lock spawn.lock within 10 s")
 
 

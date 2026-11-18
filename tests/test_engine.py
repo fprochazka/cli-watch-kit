@@ -497,3 +497,22 @@ def test_a_bug_in_a_request_is_answered_and_logged(clock: Clock, caplog: pytest.
     assert response == {"ok": False, "error": "the daemon failed: KeyError: 'a bug in account()'"}
     assert "the 'subscribe' request failed" in caplog.text and "KeyError" in caplog.text
     assert "a-secret-token" not in caplog.text
+
+
+def test_private_events_and_the_snapshot_come_again_until_their_answer_is_acknowledged(clock: Clock) -> None:
+    engine = Engine(FakeSource(World(items={"a": {"status": "open"}})), clock=clock)
+
+    async def scenario() -> None:
+        sub = await engine.subscribe("client", ITEM, ALL_ITEM)
+        sid = sub["subscription_id"]
+        await engine.poll_due_once()
+        first = engine.poll("client", {sid: 0}, {})
+        assert kinds(first, sid) == ["watch_started"] and sid in first["snapshots"]
+        # That answer was lost: the next poll carries no ack for it, so it comes again.
+        again = engine.poll("client", {sid: 0}, {})
+        assert kinds(again, sid) == ["watch_started"] and sid in again["snapshots"]
+        acked = engine.poll("client", {sid: 0}, again["acks"])
+        assert kinds(acked, sid) == [] and acked["snapshots"] == {}
+        assert engine.poll("client", {sid: 0}, acked["acks"])["events"] == {}
+
+    run(scenario())

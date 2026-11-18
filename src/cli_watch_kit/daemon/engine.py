@@ -92,6 +92,10 @@ class Subscription:
     started: bool = False
     private: list[Event] = field(default_factory=list)
     sent_snapshot_hash: str | None = None
+    unacked: list[Event] = field(default_factory=list)
+    """Private events of the last answer, sent again until the watcher acknowledges that answer."""
+    unacked_snapshot_hash: str | None = None
+    answer: int = 0
 
 
 @dataclass
@@ -221,7 +225,14 @@ class Engine:
         self._kick()
         return {"subscription_id": sub.id, "cursor": cursor}
 
-    def poll(self, client_id: str, cursors: Mapping[str, int]) -> dict[str, Any]:
+    def poll(self, client_id: str, cursors: Mapping[str, int], acks: Mapping[str, int] | None = None) -> dict[str, Any]:
+        """New events and snapshots per subscription, after each cursor.
+
+        Events in the log are found again through the cursor when an answer is lost. Private events (a subscriber's
+        `watch_started`, a replayed `watch_ended`, the events from its baseline gap) and the snapshot are not, so an
+        answer numbers them in `acks`, and they are sent again until the watcher passes that number back in `acks`.
+        Without `acks` (a caller that never loses an answer) they count as delivered at once.
+        """
         now = self.lease_clock()
         for owned in self.subscriptions.values():
             if owned.client_id == client_id:
@@ -229,21 +240,40 @@ class Engine:
         events: dict[str, list[dict[str, Any]]] = {}
         snapshots: dict[str, dict[str, Any]] = {}
         unknown: list[str] = []
+        answers: dict[str, int] = {}
         for sid, cursor in cursors.items():
             sub = self.subscriptions.get(sid)
             res = self.resources.get(sub.rid) if sub is not None and sub.client_id == client_id else None
             if sub is None or res is None:
                 unknown.append(sid)
                 continue
-            batch = list(sub.private)
+            if acks is None or (sub.answer and acks.get(sid) == sub.answer):
+                sub.unacked.clear()
+                if sub.unacked_snapshot_hash is not None:
+                    sub.sent_snapshot_hash = sub.unacked_snapshot_hash
+            sub.unacked.extend(sub.private)
             sub.private.clear()
+            batch = list(sub.unacked)
             batch.extend(e for e in res.log if e.seq > cursor and e.kind in sub.events)
             if batch:
                 events[sid] = [e.to_json() for e in batch]
+            sub.unacked_snapshot_hash = None
             if res.snapshot_hash is not None and res.snapshot_hash != sub.sent_snapshot_hash:
                 snapshots[sid] = {"hash": res.snapshot_hash, "data": res.snapshot_json}
-                sub.sent_snapshot_hash = res.snapshot_hash
-        return {"events": events, "snapshots": snapshots, "unknown": unknown, "next_poll_ms": self.client_poll_ms}
+                sub.unacked_snapshot_hash = res.snapshot_hash
+            if acks is None:
+                sub.unacked.clear()
+                if sub.unacked_snapshot_hash is not None:
+                    sub.sent_snapshot_hash = sub.unacked_snapshot_hash
+            sub.answer += 1
+            answers[sid] = sub.answer
+        return {
+            "events": events,
+            "snapshots": snapshots,
+            "unknown": unknown,
+            "acks": answers,
+            "next_poll_ms": self.client_poll_ms,
+        }
 
     def unsubscribe(self, client_id: str, subscription_id: str) -> bool:
         sub = self.subscriptions.get(subscription_id)

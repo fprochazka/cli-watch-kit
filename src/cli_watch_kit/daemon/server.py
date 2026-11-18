@@ -69,7 +69,10 @@ async def handle(
             cursors = request.get("cursors") or {}
             if not isinstance(cursors, dict) or not all(isinstance(v, int) for v in cursors.values()):
                 raise RequestError("cursors must map subscription ids to integers")
-            return {"ok": True, **engine.poll(_str(request, "client_id"), cursors)}
+            acks = request.get("acks")
+            if acks is not None and (not isinstance(acks, dict) or not all(isinstance(v, int) for v in acks.values())):
+                raise RequestError("acks must map subscription ids to integers")
+            return {"ok": True, **engine.poll(_str(request, "client_id"), cursors, acks)}
         if op == "unsubscribe":
             removed = engine.unsubscribe(_str(request, "client_id"), _str(request, "subscription_id"))
             return {"ok": True, "removed": removed}

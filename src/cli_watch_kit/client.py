@@ -72,7 +72,9 @@ class Backend(Protocol):
         source_options: Mapping[str, Any],
     ) -> tuple[str, int]: ...
 
-    def poll(self, client_id: str, cursors: dict[str, int]) -> dict[str, Any]: ...
+    def poll(self, client_id: str, cursors: dict[str, int], acks: dict[str, int]) -> dict[str, Any]:
+        """New events after the cursors. `acks` passes back the `acks` of the last answer that arrived."""
+        ...
 
     def unsubscribe(self, client_id: str, subscription_id: str) -> None: ...
 
@@ -158,8 +160,8 @@ class DaemonBackend:
         response = self._call(_subscribe_payload(client_id, target, events, baseline, params, source_options))
         return str(response["subscription_id"]), int(response["cursor"])
 
-    def poll(self, client_id: str, cursors: dict[str, int]) -> dict[str, Any]:
-        return self._call({"op": "poll", "client_id": client_id, "cursors": cursors})
+    def poll(self, client_id: str, cursors: dict[str, int], acks: dict[str, int]) -> dict[str, Any]:
+        return self._call({"op": "poll", "client_id": client_id, "cursors": cursors, "acks": acks})
 
     def call(self, op: str, payload: Mapping[str, Any], params: Params | None = None) -> dict[str, Any]:
         body: dict[str, Any] = {**payload, "op": op}
@@ -227,8 +229,8 @@ class InProcessBackend:
         response = self._call(_subscribe_payload(client_id, target, events, baseline, params, source_options))
         return str(response["subscription_id"]), int(response["cursor"])
 
-    def poll(self, client_id: str, cursors: dict[str, int]) -> dict[str, Any]:
-        return self._call({"op": "poll", "client_id": client_id, "cursors": cursors})
+    def poll(self, client_id: str, cursors: dict[str, int], acks: dict[str, int]) -> dict[str, Any]:
+        return self._call({"op": "poll", "client_id": client_id, "cursors": cursors, "acks": acks})
 
     def call(self, op: str, payload: Mapping[str, Any], params: Params | None = None) -> dict[str, Any]:
         body: dict[str, Any] = {**payload, "op": op}
@@ -334,6 +336,7 @@ class Watcher:
         # The daemon's sequence number of the last event received. It restarts when the daemon restarts, so it is
         # only the poll cursor. Reported events carry the watcher's own `_seq`, which never goes back.
         self._cursor = 0
+        self._acks: dict[str, int] = {}
         self._seq = 0
         self._snapshot_hash: str | None = None
 
@@ -429,7 +432,7 @@ class Watcher:
                 assert self._subscription is not None
                 self.sink.tick()
                 try:
-                    response = self.backend.poll(self.client_id, {self._subscription: self._cursor})
+                    response = self.backend.poll(self.client_id, {self._subscription: self._cursor}, self._acks)
                 except DaemonTimeout as exc:
                     # A busy daemon: polling is safe to repeat, so ask again rather than give up the watch.
                     if deadline is not None and self.clock() >= deadline:
@@ -438,6 +441,7 @@ class Watcher:
                     self.status.line(f"{exc}; polling again")
                     self._wakeup.wait(1.0)
                     continue
+                self._acks = {k: int(v) for k, v in (response.get("acks") or {}).items()}
                 if self._subscription in response.get("unknown", []):
                     self.status.line("daemon restarted, subscribing again")
                     if self._resubscribe(deadline):
