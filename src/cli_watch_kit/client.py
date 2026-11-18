@@ -443,7 +443,7 @@ class Watcher:
                     self._finish(self._end_event("idle", idle_after=format_duration(s.idle_after or 0.0)))
                     return EXIT_OK
                 self._wakeup.wait(self._wait(response, deadline, idle))
-        except (BackendError, DaemonMismatch, DaemonUnavailable) as exc:
+        except (BackendError, DaemonMismatch, DaemonUnavailable, TimeoutError) as exc:
             if self._stop_reason is not None:
                 # Stopped while a request was in flight, and the daemon is gone: end like any other stop.
                 self._finish(self._end_event(self._stop_reason))

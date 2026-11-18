@@ -28,6 +28,8 @@ from cli_watch_kit.paths import ensure_private_dir
 if TYPE_CHECKING:
     from cli_watch_kit.app import WatchApp
 
+SHUTDOWN_GRACE = 1.0
+"""Seconds a stopping daemon gives the requests in flight before it cuts their connections."""
 MAX_LINE = 64 * 1024 * 1024
 """Enough for a large artifact, base64-encoded, in one response line."""
 
@@ -126,12 +128,43 @@ def _write_private(path: Path, content: str) -> None:
     os.replace(tmp, path)
 
 
-async def start_server(files: DaemonFiles, handler: Handler) -> tuple[asyncio.AbstractServer, Callable[[], None]]:
-    """Start listening. Return the server and a cleanup function that removes the endpoint file."""
+@dataclass
+class Listener:
+    """The listening daemon: `cleanup` removes the endpoint file, `close` ends the server and its connections."""
+
+    server: asyncio.AbstractServer
+    cleanup: Callable[[], None]
+    connections: set[asyncio.Task[Any]]
+
+    async def close(self, grace: float = SHUTDOWN_GRACE) -> None:
+        """Stop accepting, give the requests in flight `grace` seconds to finish, then cut the rest.
+
+        `Server.wait_closed()` waits for every open connection since Python 3.12, so a silent or slow client would
+        otherwise keep the daemon, and its lock, alive until the connection's read timeout.
+        """
+        self.server.close()
+        pending = {t for t in self.connections if not t.done()}
+        if pending:
+            _, pending = await asyncio.wait(pending, timeout=grace)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.wait(pending, timeout=grace)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self.server.wait_closed(), grace)
+
+
+async def start_server(files: DaemonFiles, handler: Handler) -> Listener:
+    """Start listening on the daemon's endpoint."""
     ensure_private_dir(files.state_dir)
     token = secrets.token_hex(16) if files.use_tcp else None
+    connections: set[asyncio.Task[Any]] = set()
 
     async def on_connection(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            connections.add(task)
+            task.add_done_callback(connections.discard)
         try:
             line = await asyncio.wait_for(reader.readuntil(b"\n"), 10)
             request = json.loads(line)
@@ -161,7 +194,7 @@ async def start_server(files: DaemonFiles, handler: Handler) -> tuple[asyncio.Ab
             with contextlib.suppress(OSError):
                 files.socket.unlink()
 
-        return server, cleanup
+        return Listener(server, cleanup, connections)
 
     server = await asyncio.start_server(on_connection, host="127.0.0.1", port=0, limit=MAX_LINE)
     port = server.sockets[0].getsockname()[1]
@@ -171,7 +204,7 @@ async def start_server(files: DaemonFiles, handler: Handler) -> tuple[asyncio.Ab
         with contextlib.suppress(OSError):
             files.endpoint.unlink()
 
-    return server, cleanup_tcp
+    return Listener(server, cleanup_tcp, connections)
 
 
 def _connect(files: DaemonFiles, timeout: float) -> tuple[socket.socket, str | None]:

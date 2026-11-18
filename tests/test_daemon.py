@@ -25,7 +25,7 @@ import pytest
 
 from cli_watch_kit.app import LIB_PROTOCOL, CodeStamp, WatchApp
 from cli_watch_kit.daemon.lifecycle import daemon_running, ensure_daemon, needs_drain, spawn_daemon, stop_daemon
-from cli_watch_kit.daemon.transport import DaemonFiles, DaemonUnavailable
+from cli_watch_kit.daemon.transport import DaemonFiles, DaemonUnavailable, _connect
 from cli_watch_kit.daemon.transport import request as daemon_request
 from cli_watch_kit.source import Target
 from fakeapp.app import APP
@@ -415,3 +415,21 @@ def test_no_daemon_polls_in_process(daemon_env: DaemonEnv) -> None:
     assert [json.loads(line)["kind"] for line in out.splitlines()] == ["watch_started", "watch_ended"]
     assert "fakeapp watch: daemon: in-process (--no-daemon), private budget" in err
     assert not daemon_running(daemon_env.files)
+
+
+def test_a_silent_connection_holds_up_neither_a_stop_nor_a_drain(daemon_env: DaemonEnv) -> None:
+    first = ensure_daemon(APP)
+    silent, _ = _connect(daemon_env.files, 5)
+    started = time.monotonic()
+    assert stop_daemon(daemon_env.files)
+    assert time.monotonic() - started < 5
+    silent.close()
+
+    second = ensure_daemon(APP)
+    assert second["pid"] != first["pid"]
+    silent, _ = _connect(daemon_env.files, 5)
+    assert daemon_request(daemon_env.files, {"op": "drain"})["ok"]
+    started = time.monotonic()
+    third = ensure_daemon(APP)
+    assert third["pid"] != second["pid"] and time.monotonic() - started < 6
+    silent.close()

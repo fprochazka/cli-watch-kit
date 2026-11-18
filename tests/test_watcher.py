@@ -19,6 +19,7 @@ from cli_watch_kit.changelog import Changelog
 from cli_watch_kit.cli import WatchOptions
 from cli_watch_kit.client import InProcessBackend, Watcher, WatchSettings, WriterContext
 from cli_watch_kit.events import Event
+from cli_watch_kit.locks import LockTimeout
 from cli_watch_kit.sinks import StatusOutput, StdoutSink
 from cli_watch_kit.source import Params, Target
 from fakeapp.source import FakeSource, World
@@ -263,3 +264,24 @@ def test_run_watch_subscribes_to_the_extra_kinds_without_reporting_them(
     assert reported[0]["artifacts"] == [str(tmp_path / "item" / "a" / "started.txt")]
     assert cli.run_watch(app, TARGET, options, also_subscribe=["box_changed"]) == 2
     assert "cannot also subscribe" in capsys.readouterr().err
+
+
+class LockedOutBackend(ScriptedBackend):
+    """A daemon that cannot be reached because another watcher holds the spawn lock for too long."""
+
+    def poll(self, client_id: str, cursors: dict[str, int]) -> dict[str, Any]:
+        raise LockTimeout("could not lock spawn.lock within 10 s")
+
+
+def test_a_spawn_lock_timeout_ends_the_watch_with_an_error_line(tmp_path: Path) -> None:
+    status = io.StringIO()
+    watcher = Watcher(
+        WatchSettings(TARGET, ALL),
+        LockedOutBackend([]),
+        StdoutSink(io.StringIO()),
+        Changelog(tmp_path, TARGET.key),
+        StatusOutput("test: ", status),
+        clock=Ticks(),
+    )
+    assert watcher.run() == 1
+    assert "test: error: could not lock spawn.lock within 10 s" in status.getvalue()

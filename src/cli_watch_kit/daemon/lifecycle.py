@@ -67,7 +67,7 @@ async def serve(
     async def on_request(req: dict[str, Any]) -> dict[str, Any]:
         return await handle(engine, req, stop, identity)
 
-    server, cleanup = await start_server(files, on_request)
+    listener = await start_server(files, on_request)
     log.info(
         "daemon %s %s (cli-watch-kit %s, code %s) started, pid %d, endpoint %s, idle timeout %.0f s",
         app.name,
@@ -96,9 +96,8 @@ async def serve(
                 stop.set()
     finally:
         # Remove the endpoint first, so a watcher that connects from now on starts a new daemon.
-        cleanup()
-        server.close()
-        await server.wait_closed()
+        listener.cleanup()
+        await listener.close()
         stop.set()
         with contextlib.suppress(Exception, asyncio.CancelledError):
             await engine_task
