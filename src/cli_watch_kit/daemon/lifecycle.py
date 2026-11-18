@@ -85,7 +85,13 @@ async def serve(
         while not stop.is_set():
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), 1.0)
-            if engine.idle_for(engine.clock()) >= idle_timeout:
+            if engine_task.done():
+                # The engine never stops on its own: without it the watchers would wait forever. Exit, so they
+                # start a new daemon and resubscribe.
+                reason = engine_task.exception() if not engine_task.cancelled() else "cancelled"
+                log.error("the engine stopped (%r), exiting", reason)
+                stop.set()
+            elif engine.idle_for(engine.clock()) >= idle_timeout:
                 log.info("no subscriptions for %.0f s, exiting", idle_timeout)
                 stop.set()
     finally:
@@ -94,7 +100,8 @@ async def serve(
         server.close()
         await server.wait_closed()
         stop.set()
-        await engine_task
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            await engine_task
         log.info("daemon stopped")
 
 

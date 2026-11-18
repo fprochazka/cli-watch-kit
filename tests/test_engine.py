@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Mapping, Sequence
 from typing import Any
 
 import pytest
 
 from cli_watch_kit.daemon.engine import Engine, EngineError
 from cli_watch_kit.daemon.scheduler import Scheduler
-from cli_watch_kit.source import Target, Unauthorized
+from cli_watch_kit.source import PollItem, Target, Unauthorized
 from conftest import Clock
 from fakeapp.source import FakeSource, World
 
@@ -360,3 +360,70 @@ def test_scheduler_batches_a_due_group_and_pulls_in_its_members_due_soon() -> No
     batches = scheduler.ready_batches(2, groups.get, window=5)
     assert batches == [["a1", "a2"], ["b1", "b2"], ["solo"]]
     assert scheduler.ready_batches(2, groups.get) == [["a1"], ["b1"], ["solo"]]
+
+
+class FaultySource(FakeSource):
+    """A source with bugs that can be switched on: its interval raises for some targets, its cost for all."""
+
+    def __init__(self, world: World) -> None:
+        super().__init__(world, batching=True)
+        self.bad_interval: set[str] = set()
+        self.bad_cost = False
+
+    def interval(self, target: Target, snapshot: dict[str, Any] | None) -> float:
+        if target.id in self.bad_interval:
+            raise KeyError("a bug in the app")
+        return super().interval(target, snapshot)
+
+    def cost(self, batch: Sequence[PollItem[dict[str, Any]]]) -> Mapping[str, float]:
+        if self.bad_cost:
+            raise RuntimeError("a bug in cost")
+        return super().cost(batch)
+
+
+def test_a_bug_in_the_source_degrades_its_target_and_the_others_keep_polling(clock: Clock) -> None:
+    source = FaultySource(World(items={i: {"status": "open"} for i in "abc"}))
+    engine = Engine(source, clock=clock, lease_timeout=1e9)
+
+    async def scenario() -> None:
+        subs = {i: await engine.subscribe("client", Target("item", i), ALL_ITEM) for i in "abc"}
+        await engine.poll_due_once()
+        source.bad_interval = {"b"}
+        clock.advance(10)
+        await engine.poll_due_once()
+        bad = engine.resources["item b"]
+        assert not bad.polling and bad.degraded == "error"
+        assert engine.scheduler.due_at("item b") is not None
+        response = engine.poll("client", {subs["b"]["subscription_id"]: 0})
+        degraded = events_of(response, subs["b"]["subscription_id"])[-1]
+        assert degraded["kind"] == "watch_degraded" and "a bug in the app" in degraded["data"]["message"]
+        assert engine.resources["item a"].degraded is None
+        source.bad_interval = set()
+        clock.advance(1000)
+        calls = len(source.calls)
+        await engine.poll_due_once()
+        assert any("item b" in call.keys for call in source.calls[calls:])
+        assert engine.resources["item b"].degraded is None
+
+    run(scenario())
+
+
+def test_a_bug_in_cost_never_stops_the_engine_loop() -> None:
+    source = FaultySource(World(items={"a": {"status": "open"}}))
+    source.bad_cost = True
+    engine = Engine(source)
+
+    async def scenario() -> None:
+        stop = asyncio.Event()
+        task = asyncio.create_task(engine.run(stop))
+        await engine.subscribe("client", ITEM, ALL_ITEM)
+        engine._kick()
+        await asyncio.sleep(0.2)
+        assert not task.done()
+        assert engine.resources[ITEM.key].degraded == "error"
+        assert not engine.resources[ITEM.key].polling
+        stop.set()
+        engine._kick()
+        await task
+
+    run(scenario())

@@ -65,6 +65,8 @@ DEFAULT_CLIENT_POLL_MS = 5000
 MAX_ERROR_BACKOFF = 300.0
 MIN_INTERVAL = 0.5
 RECENT_BATCHES = 20
+FALLBACK_INTERVAL = 60.0
+"""The interval of a resource whose source failed to say one."""
 
 
 class EngineError(Exception):
@@ -476,7 +478,11 @@ class Engine:
 
     def _interval(self, res: Resource) -> float:
         if res.interval is None:
-            res.interval = self.source.interval(res.target, res.snapshot)
+            try:
+                res.interval = self.source.interval(res.target, res.snapshot)
+            except Exception:
+                log.exception("the interval of %s failed", res.rid)
+                return FALLBACK_INTERVAL
         return max(res.interval, MIN_INTERVAL)
 
     def _stretch(self, account: str, now: float) -> float:
@@ -555,8 +561,22 @@ class Engine:
             outcome = outcomes.get(item.key)
             if outcome is None:
                 outcome = PollOutcome(error=Transient(f"the source returned no outcome for {item.key}"))
-            self._apply(res, outcome, now)
+            try:
+                self._apply(res, outcome, now)
+            except Exception as exc:
+                # A bug in the source's interval, summary, children or encode must cost this target one poll, not
+                # leave it marked as polling forever.
+                log.exception("handling the poll of %s failed", res.rid)
+                self._fail(res, f"{type(exc).__name__}: {exc}", now)
         self._kick()
+
+    def _fail(self, res: Resource, message: str, now: float) -> None:
+        """Report an error of the source's code for `res` as `watch_degraded` and try again after a backoff."""
+        res.polling = False
+        if self.resources.get(res.rid) is not res or res.ended:
+            return
+        self._degrade(res, "error", message)
+        self.scheduler.schedule(res.rid, now + self._error_delay(res))
 
     def _apply(self, res: Resource, outcome: PollOutcome[Any], now: float) -> None:
         res.polling = False
@@ -623,11 +643,26 @@ class Engine:
                 continue
             account_name = batch[0].account
             account = self.account(account_name)
-            for chunk in self._split(batch):
+            try:
+                chunks = self._split(batch)
+            except Exception as exc:
+                log.exception("splitting the batch of %s failed", ", ".join(r.rid for r in batch))
+                for res in batch:
+                    self.scheduler.mark_served(res.rid, now)
+                    self._fail(res, f"{type(exc).__name__}: {exc}", now)
+                continue
+            for chunk in chunks:
                 if account.inflight >= self.source.max_inflight:
                     break
                 items = [self._item(r) for r in chunk]
-                cost = self.source.cost(items)
+                try:
+                    cost = self.source.cost(items)
+                except Exception as exc:
+                    log.exception("the cost of %s failed", ", ".join(r.rid for r in chunk))
+                    for res in chunk:
+                        self.scheduler.mark_served(res.rid, now)
+                        self._fail(res, f"{type(exc).__name__}: {exc}", now)
+                    continue
                 if not account.budget.can_spend(cost, now):
                     wait = min(wait, max(0.05, account.budget.wait_time(cost, now)))
                     continue
