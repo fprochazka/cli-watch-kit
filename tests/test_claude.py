@@ -228,7 +228,10 @@ def test_the_package_imports_no_cc_blackbox_until_a_stream_needs_it() -> None:
     import subprocess
     import sys
 
-    code = "import sys, cli_watch_kit.claude, cli_watch_kit.app; print('cc_blackbox' in sys.modules)"
+    code = (
+        "import sys, cli_watch_kit.cli, cli_watch_kit.client, cli_watch_kit.daemon.lifecycle;"
+        " print('cc_blackbox' in sys.modules)"
+    )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60, check=True)
     assert result.stdout.strip() == "False"
 
