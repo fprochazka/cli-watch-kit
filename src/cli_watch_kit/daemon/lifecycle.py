@@ -26,13 +26,14 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from cli_watch_kit.app import WatchApp
 from cli_watch_kit.daemon.engine import DEFAULT_CLIENT_POLL_MS, DEFAULT_LEASE_TIMEOUT, Engine
 from cli_watch_kit.daemon.server import handle
-from cli_watch_kit.daemon.transport import DaemonFiles, DaemonUnavailable, request, start_server
+from cli_watch_kit.daemon.transport import DaemonFiles, DaemonStartFailed, DaemonUnavailable, request, start_server
 from cli_watch_kit.locks import FileLock
 from cli_watch_kit.paths import ensure_private_dir
 
@@ -118,13 +119,18 @@ def _detach(app: WatchApp) -> int:
     if pid > 0:
         os.close(write_end)
         with os.fdopen(read_end, "rb") as ready:
-            # One byte once the daemon listens or knows another daemon holds the lock; EOF if it died first.
-            ready.read(1)
-        return 0
+            # One byte once the daemon listens or knows another daemon holds the lock; EOF if it died first. The
+            # exit code tells the watcher that started it whether to wait for it or to give up.
+            started = ready.read(1)
+        return 0 if started else 1
     os.close(read_end)
     code = 1
     try:
         code = _serve_daemon(app, write_end)
+    except BaseException:
+        # Without this the traceback would die with os._exit below, and the log would say nothing.
+        traceback.print_exc()
+        sys.stderr.flush()
     finally:
         logging.shutdown()
         # Never fall back into the launcher's code path, whatever happened above.
@@ -134,11 +140,12 @@ def _detach(app: WatchApp) -> int:
 def _serve_daemon(app: WatchApp, ready_fd: int | None) -> int:
     """Take the lock or exit, then serve until idle or stopped. `ready_fd` gets one byte when the launcher may go."""
 
-    def notify() -> None:
+    def notify(ready: bool = True) -> None:
         nonlocal ready_fd
         if ready_fd is not None:
             with contextlib.suppress(OSError):
-                os.write(ready_fd, b"1")
+                if ready:
+                    os.write(ready_fd, b"1")
                 os.close(ready_fd)
             ready_fd = None
 
@@ -153,6 +160,7 @@ def _serve_daemon(app: WatchApp, ready_fd: int | None) -> int:
     try:
         if not lock.try_acquire():
             log.info("another daemon holds %s, exiting", files.lock)
+            notify()
             return 0
         engine = Engine(
             app.make_source(),
@@ -161,8 +169,12 @@ def _serve_daemon(app: WatchApp, ready_fd: int | None) -> int:
         )
         idle_timeout = _env_float(app.env("IDLE_TIMEOUT"), DEFAULT_IDLE_TIMEOUT)
         asyncio.run(serve(app, files, engine, idle_timeout, notify))
+    except Exception:
+        log.exception("the daemon failed")
+        return 1
     finally:
-        notify()
+        # Still not ready here means the daemon failed before it listened: EOF tells the launcher so.
+        notify(ready=False)
         lock.release()
     return 0
 
@@ -250,6 +262,9 @@ def ensure_daemon(
             hello = ping(files, timeout=1.0)
             if hello is not None:
                 return hello
+            if spawned is not None and spawned.poll() not in (None, 0) and not daemon_running(files):
+                # The daemon died before it listened. Starting it again would fail the same way.
+                raise DaemonStartFailed(f"the daemon failed to start: {_last_log_line(files)}; see {files.log}")
             # A daemon that is exiting on idle releases its lock last; spawn again once it is gone.
             if (spawned is None or spawned.poll() is not None) and not daemon_running(files):
                 # Nothing holds the daemon lock, so no daemon is alive: any endpoint file left is stale.
@@ -259,6 +274,14 @@ def ensure_daemon(
                 spawned = spawn_daemon(app, files)
             time.sleep(0.05)
     raise DaemonUnavailable(f"the daemon did not start within {timeout:.0f} s; see {files.log}")
+
+
+def _last_log_line(files: DaemonFiles) -> str:
+    try:
+        lines = files.log.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+    except OSError:
+        return "no log"
+    return lines[-1] if lines else "an empty log"
 
 
 def daemon_running(files: DaemonFiles) -> bool:

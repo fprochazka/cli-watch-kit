@@ -228,6 +228,8 @@ class FakeSource(Source[Snapshot]):
 
 def source_from_env() -> FakeSource:
     """The source of the daemon process: the world in the spec file, the calls logged to the log file."""
+    if os.environ.get("FAKE_SOURCE_FAIL"):
+        raise RuntimeError("the fake source cannot start")
     spec = os.environ[SPEC_ENV]
     log = os.environ.get(LOG_ENV)
     return FakeSource(

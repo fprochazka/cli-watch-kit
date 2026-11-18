@@ -25,7 +25,7 @@ import pytest
 
 from cli_watch_kit.app import LIB_PROTOCOL, CodeStamp, WatchApp
 from cli_watch_kit.daemon.lifecycle import daemon_running, ensure_daemon, needs_drain, spawn_daemon, stop_daemon
-from cli_watch_kit.daemon.transport import DaemonFiles, DaemonUnavailable, _connect
+from cli_watch_kit.daemon.transport import DaemonFiles, DaemonStartFailed, DaemonUnavailable, _connect
 from cli_watch_kit.daemon.transport import request as daemon_request
 from cli_watch_kit.source import Target
 from fakeapp.app import APP
@@ -435,3 +435,18 @@ def test_a_silent_connection_holds_up_neither_a_stop_nor_a_drain(daemon_env: Dae
     third = ensure_daemon(APP)
     assert third["pid"] != second["pid"] and time.monotonic() - started < 6
     silent.close()
+
+
+def test_a_daemon_that_fails_to_start_says_why_and_is_not_started_again(
+    daemon_env: DaemonEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_SOURCE_FAIL", "1")
+    started = time.monotonic()
+    with pytest.raises(
+        DaemonStartFailed, match="the daemon failed to start: RuntimeError: the fake source cannot start"
+    ):
+        ensure_daemon(APP)
+    assert time.monotonic() - started < 8
+    log = daemon_env.files.log.read_text()
+    # One attempt, not a respawn loop until the start timeout.
+    assert "Traceback" in log and log.count("RuntimeError: the fake source cannot start") == 1
