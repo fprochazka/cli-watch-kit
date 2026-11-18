@@ -36,6 +36,8 @@ class WatchApp:
     - `env_prefix`: the prefix of the override variables. Default: `name` in upper case with `_`, plus `_`.
     - `files_dir_name`: the name of the dir the watchers' files go under, in the session scratchpad or the temp
       dir (`linear-cli`). Default: `name`.
+    - `sender`: the sender id of a Claude Code message is `<sender>:<pid>`. Default: `name`. An app that kept the name
+      of an older daemon dir sets it to keep the sender id its readers know (glab-watch: `glab-watch`).
     - `client_poll_ms`, `lease_timeout`: how often watchers poll the engine and how long a subscription lives
       without a poll. Default: 5000 ms and 20 s. `<PREFIX>CLIENT_POLL_MS` and `<PREFIX>LEASE_TIMEOUT` override both,
       for the daemon and for `--no-daemon` alike.
@@ -51,6 +53,7 @@ class WatchApp:
     command: str = ""
     env_prefix: str = ""
     files_dir_name: str = ""
+    sender: str = ""
     client_poll_ms: int | None = None
     lease_timeout: float | None = None
     _made: dict[str, Source[Any]] = field(default_factory=dict, init=False, compare=False, repr=False)
@@ -60,6 +63,8 @@ class WatchApp:
             object.__setattr__(self, "command", self.name)
         if not self.env_prefix:
             object.__setattr__(self, "env_prefix", self.name.upper().replace("-", "_") + "_")
+        if not self.sender:
+            object.__setattr__(self, "sender", self.name)
 
     def make_source(self) -> Source[Any]:
         """The source, built once."""

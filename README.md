@@ -140,6 +140,8 @@ An app with requests the daemon should serve within the budget (fetching a log f
 
 With the `claude-code` extra, `--events-stream=auto` (the default) sends the events into the Claude Code session that started the watcher, when that session accepts messages, as `<envelope_tag resource="issue ABC-123" seq="1-2">` blocks. cc-blackbox does the delivery: session lookup, the protocol check, burst batching, the 64 KB cap, the receiver's rate limit, and the end of the watch when the session is gone. The resource dir then lives in the session's scratchpad. Without the extra, `auto` uses stdout, and under Claude Code the header says which extra to install; `claude-message` fails with the same hint. Nothing imports cc-blackbox until a stream needs it.
 
+A message's sender id is `<WatchApp.sender>:<pid>` (default: the app's name), and its sender name is what `run_watch(sender_name=...)` says (default: `<command> <target key>`).
+
 ## Developing
 
 ```bash

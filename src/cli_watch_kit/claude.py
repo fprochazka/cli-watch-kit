@@ -6,7 +6,7 @@ messaging protocol is one it speaks, batches the events that arrive within 3 s i
 64 KB, keeps below the session's rate limit, notices when the session is gone, and moves the events to stdout when
 messaging stops working. Without the extra, `auto` falls back to stdout and says which extra to install.
 
-Each message is a `<{envelope_tag} resource="..." seq="...">` block for one resource, sent as `<app>:<pid>` under a
+Each message is a `<{envelope_tag} resource="..." seq="...">` block for one resource, sent as `<sender>:<pid>` under a
 sender name the app chooses. Only the message with `watch_started` names the resource dir and the changelog.
 Delivery is best effort: the receiver may rate-limit a message, or hold it until its user approves it. The changelog
 always has every event.
@@ -184,7 +184,7 @@ def claude_message_sink(
     return MessageEventSink(
         session,
         message_envelope(app, resource, changelog),
-        sender=f"{app.name}:{os.getpid()}",
+        sender=f"{app.sender}:{os.getpid()}",
         sender_name=sender_name,
         status=status.line,
         priority=cast(Priority, priority),

@@ -9,6 +9,7 @@ import socket
 import tempfile
 import threading
 from collections.abc import Iterator
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -117,6 +118,16 @@ def test_a_burst_goes_out_as_one_message_in_the_apps_envelope(receiver: Receiver
     content = frames[0]["message"]["content"]
     assert f'<demo-watcher resource="{RESOURCE}" seq="3-4">' in content
     assert '{"kind":"note_added","seq":4,"data":{"notes":1}}' in content
+
+
+def test_an_app_can_choose_the_sender_id(receiver: Receiver, clock: Clock, tmp_path: Path) -> None:
+    app = replace(APP, sender="demo")
+    session = cast(Any, fake_session(receiver.path))
+    status = StatusOutput(app.status_prefix)
+    sink = claude_message_sink(app, session, RESOURCE, "demo watch item a", tmp_path / "e.jsonl", "next", status)
+    sink.emit([event("watch_ended", 1, reason="done")])
+    assert wait_frames(receiver, 1)[0]["from"] == f"demo:{os.getpid()}"
+    sink.close()
 
 
 def test_only_the_first_watch_started_message_names_the_dir_and_the_changelog(
