@@ -10,8 +10,12 @@ from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from cli_watch_kit import cli
 from cli_watch_kit.app import WatchApp
 from cli_watch_kit.changelog import Changelog
+from cli_watch_kit.cli import WatchOptions
 from cli_watch_kit.client import InProcessBackend, Watcher, WatchSettings
 from cli_watch_kit.events import Event
 from cli_watch_kit.sinks import StatusOutput, StdoutSink
@@ -208,3 +212,28 @@ def test_the_in_process_backend_runs_the_engine_and_the_ops(tmp_path: Path) -> N
         assert backend.poll("c", {sid: cursor})["ok"]
     finally:
         backend.close()
+
+
+def test_run_watch_subscribes_to_the_extra_kinds_without_reporting_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    backend = ScriptedBackend([[daemon_event("watch_started", 0, summary={}), daemon_event("note_added", 1)]])
+    subscribed: list[frozenset[str]] = []
+    original = backend.subscribe
+
+    def recording(client_id: str, target: Target, events: frozenset[str], *rest: Any) -> tuple[str, int]:
+        subscribed.append(events)
+        return original(client_id, target, events, *rest)
+
+    monkeypatch.setattr(backend, "subscribe", recording)
+    monkeypatch.setattr(cli, "default_backend", lambda app, no_daemon: backend)
+    app = WatchApp("inproc", FakeSource(), "unused.daemon", 1, "0", "inproc: ", "inproc-watcher")
+    options = WatchOptions(events=("status",), timeout="1s", events_stream="stdout", base_dir=tmp_path)
+    assert cli.run_watch(app, TARGET, options, also_subscribe=["note_added"]) == 0
+    assert subscribed == [frozenset({"status_changed", "note_added", "watch_started", "watch_degraded", "watch_ended"})]
+    assert [json.loads(line)["kind"] for line in capsys.readouterr().out.splitlines()] == [
+        "watch_started",
+        "watch_ended",
+    ]
+    assert cli.run_watch(app, TARGET, options, also_subscribe=["box_changed"]) == 2
+    assert "cannot also subscribe" in capsys.readouterr().err

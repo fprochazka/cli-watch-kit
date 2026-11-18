@@ -153,6 +153,7 @@ def run_watch(
     params: Mapping[str, Any] | None = None,
     source_options: Mapping[str, Any] | None = None,
     enabled_thresholds: Iterable[str] = (),
+    also_subscribe: Iterable[str] = (),
     timers: Sequence[ClientTimer] = (),
     writer: Callable[[Path, Backend], Writer] | None = None,
     resource_dir: Callable[[Path, Target], Path] = default_resource_dir,
@@ -166,7 +167,9 @@ def run_watch(
 
     - `params` go with the subscription to the daemon (an API key, for example), and so do `source_options`, which
       the source checks with `Source.check_options` and gets in `PollItem.options` (glab's `--logs` mode).
-    - `enabled_thresholds` are the threshold kinds whose option was given; `timers` compute them.
+    - `enabled_thresholds` are the threshold kinds whose option was given; `timers` compute them. `also_subscribe`
+      names kinds the daemon should track although the watcher does not report them, because a timer reads what
+      they put into the snapshot (glab's `quiet` reads the head pipeline's status).
     - `writer` makes the app's resource dir writer from the resource dir and the backend, for extra ops.
     - `sender_name` is what Claude Code shows as the sender (default: `<command> <target key>`), `restart` the
       command line that watches the same target again (default: `<command> <kind> <id>`), `header` extra header lines.
@@ -180,6 +183,10 @@ def run_watch(
             raise _Usage(f"--until: a {target.kind} watch never produces {options.until!r}")
         if options.until is not None and options.until not in selected:
             raise _Usage(f"--until={options.until} is filtered out by --events/--exclude-events")
+        extra = frozenset(also_subscribe)
+        if extra - set(catalog.produced(target.kind)):
+            unknown = ", ".join(sorted(extra - set(catalog.produced(target.kind))))
+            raise _Usage(f"a {target.kind} watch never produces {unknown}, so it cannot also subscribe to it")
         timeout = _duration("--timeout", options.timeout)
         idle_after = _duration("--idle-after", options.idle_after)
         session = find_session() if options.events_stream != "stdout" else None
@@ -230,6 +237,7 @@ def run_watch(
         params=dict(params or {}),
         source_options=dict(source_options or {}),
         threshold_kinds=frozenset(catalog.thresholds),
+        subscribed=catalog.daemon_kinds(selected) | catalog.daemon_kinds(extra),
     )
     watcher = Watcher(
         settings,
