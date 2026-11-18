@@ -53,6 +53,7 @@ from cli_watch_kit.source import (
     SourceError,
     Target,
     Transient,
+    Wants,
 )
 
 log = logging.getLogger(__name__)
@@ -82,6 +83,7 @@ class Subscription:
     rid: str
     events: frozenset[str]
     renewed_at: float
+    options: Mapping[str, Any] = field(default_factory=dict)
     started: bool = False
     private: list[Event] = field(default_factory=list)
     sent_snapshot_hash: str | None = None
@@ -100,9 +102,10 @@ class Resource:
     log: deque[Event] = field(default_factory=lambda: deque(maxlen=EVENT_LOG_SIZE))
     seq: int = 0
     events: frozenset[str] = frozenset()
+    options: tuple[Mapping[str, Any], ...] = ()
     subscriptions: set[str] = field(default_factory=set)
-    parents: dict[str, frozenset[str]] = field(default_factory=dict)
-    """Parent rid -> the kinds that parent wants from this resource."""
+    parents: dict[str, Wants] = field(default_factory=dict)
+    """Parent rid -> what that parent wants from this resource."""
     children: set[str] = field(default_factory=set)
     polled: bool = False
     polling: bool = False
@@ -169,12 +172,17 @@ class Engine:
         events: frozenset[str],
         baseline: Any = None,
         params: Params | None = None,
+        options: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if target.kind not in self.source.catalog.kinds_by_resource:
             raise EngineError(f"unknown resource kind {target.kind!r}")
         unknown = set(events) - self.source.catalog.all_kinds
         if unknown:
             raise EngineError(f"unknown event kinds: {', '.join(sorted(unknown))}")
+        try:
+            checked = self.source.check_options(target, dict(options or {}))
+        except ValueError as exc:
+            raise EngineError(str(exc)) from exc
         params = dict(params or {})
         account_name = await self.source.account(target, params)
         account = self.account(account_name)
@@ -185,7 +193,7 @@ class Engine:
         res = self._acquire(account_name, target)
         if baseline is not None and not res.polled and res.snapshot is None:
             self._seed(res, baseline)
-        sub = Subscription(uuid.uuid4().hex, client_id, res.rid, events | frozenset(LIFECYCLE_KINDS), now)
+        sub = Subscription(uuid.uuid4().hex, client_id, res.rid, events | frozenset(LIFECYCLE_KINDS), now, checked)
         self.subscriptions[sub.id] = sub
         res.subscriptions.add(sub.id)
         self._idle_since = None
@@ -195,7 +203,7 @@ class Engine:
             sub.started = True
         if res.end_event is not None:
             sub.private.append(res.end_event)
-        self._recompute_events(res)
+        self._recompute_wants(res)
         log.info("subscribe %s account=%r client=%s sub=%s", target.key, account_name, client_id[:8], sub.id[:8])
         self._kick()
         return {"subscription_id": sub.id, "cursor": cursor}
@@ -253,6 +261,7 @@ class Engine:
                     "account": self.resources[s.rid].account if s.rid in self.resources else None,
                     "idle_s": round(now - s.renewed_at, 1),
                     "events": sorted(s.events - frozenset(LIFECYCLE_KINDS)),
+                    "options": dict(s.options),
                 }
                 for s in self.subscriptions.values()
             ],
@@ -348,7 +357,7 @@ class Engine:
         if child is None:
             return
         child.parents.pop(parent.rid, None)
-        self._recompute_events(child)
+        self._recompute_wants(child)
         self._release(child)
 
     def _drop_subscription(self, sub: Subscription, why: str) -> None:
@@ -357,22 +366,26 @@ class Engine:
         res = self.resources.get(sub.rid)
         if res is not None:
             res.subscriptions.discard(sub.id)
-            self._recompute_events(res)
+            self._recompute_wants(res)
             self._release(res)
         if not self.subscriptions:
             self._idle_since = self.clock()
 
-    def _recompute_events(self, res: Resource) -> None:
+    def _recompute_wants(self, res: Resource) -> None:
+        """The union of what the subscribers and parents of `res` want. Poll again at once when that grew."""
         events: set[str] = set()
-        for sid in res.subscriptions:
-            events |= self.subscriptions[sid].events
-        for wanted in res.parents.values():
-            events |= wanted
-        new = frozenset(events)
-        if new == res.events:
+        options: list[Mapping[str, Any]] = []
+        wants = [(s.events, s.options) for s in (self.subscriptions[sid] for sid in sorted(res.subscriptions))]
+        wants += [(w.events, w.options) for _, w in sorted(res.parents.items())]
+        for kinds, opts in wants:
+            events |= kinds
+            if opts and opts not in options:
+                options.append(opts)
+        new, new_options = frozenset(events), tuple(options)
+        if new == res.events and new_options == res.options:
             return
-        grew = not new <= res.events
-        res.events = new
+        grew = not new <= res.events or any(o not in res.options for o in new_options)
+        res.events, res.options = new, new_options
         if grew and res.polled and not res.ended and not res.polling:
             self.scheduler.schedule(res.rid, self.clock(), urgent=True)
             self._kick()
@@ -380,12 +393,12 @@ class Engine:
             self._reconcile_children(res)
 
     def _reconcile_children(self, res: Resource) -> None:
-        wanted: dict[str, tuple[Target, frozenset[str]]] = {}
+        wanted: dict[str, tuple[Target, Wants]] = {}
         if not res.ended and res.snapshot is not None:
-            for target, kinds in self.source.children(res.target, res.snapshot, res.events).items():
+            for target, kinds in self.source.children(res.target, res.snapshot, self._item(res)).items():
                 rid = self._rid(res.account, target)
                 if rid != res.rid:
-                    wanted[rid] = (target, frozenset(kinds))
+                    wanted[rid] = (target, kinds if isinstance(kinds, Wants) else Wants(frozenset(kinds)))
         for child_rid in list(res.children):
             if child_rid not in wanted:
                 self._unlink_child(res, child_rid)
@@ -394,7 +407,7 @@ class Engine:
             res.children.add(rid)
             if child.parents.get(res.rid) != kinds:
                 child.parents[res.rid] = kinds
-                self._recompute_events(child)
+                self._recompute_wants(child)
 
     def _seed(self, res: Resource, baseline: Any) -> None:
         """Start from a snapshot a watcher kept from an earlier daemon, so the first poll reports what changed."""
@@ -453,7 +466,7 @@ class Engine:
             self._wake.set()
 
     def _item(self, res: Resource) -> PollItem[Any]:
-        return PollItem(res.target, res.snapshot, res.events, res.state)
+        return PollItem(res.target, res.snapshot, res.events, res.state, res.options)
 
     def _interval(self, res: Resource) -> float:
         if res.interval is None:

@@ -31,11 +31,15 @@ def _str(request: Mapping[str, Any], name: str) -> str:
     return value
 
 
+def _object(request: Mapping[str, Any], name: str) -> dict[str, Any]:
+    value = request.get(name) or {}
+    if not isinstance(value, dict):
+        raise RequestError(f"{name} must be an object")
+    return value
+
+
 def _params(request: Mapping[str, Any]) -> dict[str, Any]:
-    params = request.get("params") or {}
-    if not isinstance(params, dict):
-        raise RequestError("params must be an object")
-    return params
+    return _object(request, "params")
 
 
 async def handle(
@@ -58,6 +62,7 @@ async def handle(
                 frozenset(raw_events),
                 options.get("baseline"),
                 _params(request),
+                _object(request, "source_options"),
             )
             return {"ok": True, **result}
         if op == "poll":

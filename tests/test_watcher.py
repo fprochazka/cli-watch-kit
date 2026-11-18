@@ -40,7 +40,13 @@ class ScriptedBackend:
         return "scripted"
 
     def subscribe(
-        self, client_id: str, target: Target, events: frozenset[str], baseline: Any, params: Params
+        self,
+        client_id: str,
+        target: Target,
+        events: frozenset[str],
+        baseline: Any,
+        params: Params,
+        source_options: Mapping[str, Any],
     ) -> tuple[str, int]:
         self.subscriptions.append((baseline, params))
         return f"sub-{len(self.subscriptions)}", 0
@@ -188,7 +194,7 @@ def test_the_in_process_backend_runs_the_engine_and_the_ops(tmp_path: Path) -> N
     app = WatchApp("inproc", source, "unused.daemon", 1, "0", "inproc: ", "inproc-watcher")
     backend = InProcessBackend(app)
     try:
-        sid, cursor = backend.subscribe("c", TARGET, frozenset({"status_changed"}), None, {"user": "u"})
+        sid, cursor = backend.subscribe("c", TARGET, frozenset({"status_changed"}), None, {"user": "u"}, {})
         response: dict[str, Any] = {}
         for _ in range(200):
             response = backend.poll("c", {sid: cursor})

@@ -31,6 +31,7 @@ from cli_watch_kit.source import (
     Target,
     Transient,
     Unauthorized,
+    Wants,
 )
 from fakeapp.catalog import CATALOG
 
@@ -92,6 +93,7 @@ class Call:
     keys: list[str]
     account: str
     params: dict[str, Any]
+    options: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
 
 async def _echo(ctx: OpContext, request: dict[str, Any]) -> dict[str, Any]:
@@ -148,7 +150,8 @@ class FakeSource(Source[Snapshot]):
         return {"requests": 1.0, "complexity": self.complexity_per_item * len(batch)}
 
     async def poll(self, batch: Sequence[PollItem[Snapshot]], ctx: PollContext) -> Mapping[str, PollOutcome[Snapshot]]:
-        call = Call([item.key for item in batch], ctx.account, dict(ctx.params))
+        options = {item.key: [dict(o) for o in item.options] for item in batch}
+        call = Call([item.key for item in batch], ctx.account, dict(ctx.params), options)
         self.calls.append(call)
         if self.log_path is not None:
             with open(self.log_path, "a", encoding="utf-8") as fh:
@@ -202,10 +205,17 @@ class FakeSource(Source[Snapshot]):
             raise ValueError("not a snapshot of the fake source")
         return dict(data)
 
-    def children(self, target: Target, snapshot: Snapshot, events: frozenset[str]) -> Mapping[Target, frozenset[str]]:
+    def check_options(self, target: Target, options: Mapping[str, Any]) -> Mapping[str, Any]:
+        if set(options) - {"detail"} or options.get("detail", "full") not in ("full", "brief"):
+            raise ValueError(f"unsupported options {dict(options)}")
+        return dict(options)
+
+    def children(
+        self, target: Target, snapshot: Snapshot, item: PollItem[Snapshot]
+    ) -> Mapping[Target, frozenset[str] | Wants]:
         if target.kind != "box":
             return {}
-        wanted = events & {"status_changed", "note_added"}
+        wanted = Wants(item.events & {"status_changed", "note_added"}, {"detail": "brief"})
         return {Target("item", i): wanted for i in snapshot.get("items", [])}
 
 

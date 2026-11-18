@@ -53,7 +53,13 @@ class Backend(Protocol):
     def describe(self) -> str: ...
 
     def subscribe(
-        self, client_id: str, target: Target, events: frozenset[str], baseline: Any, params: Params
+        self,
+        client_id: str,
+        target: Target,
+        events: frozenset[str],
+        baseline: Any,
+        params: Params,
+        source_options: Mapping[str, Any],
     ) -> tuple[str, int]: ...
 
     def poll(self, client_id: str, cursors: dict[str, int]) -> dict[str, Any]: ...
@@ -78,7 +84,12 @@ def _check(response: dict[str, Any]) -> dict[str, Any]:
 
 
 def _subscribe_payload(
-    client_id: str, target: Target, events: frozenset[str], baseline: Any, params: Params
+    client_id: str,
+    target: Target,
+    events: frozenset[str],
+    baseline: Any,
+    params: Params,
+    source_options: Mapping[str, Any],
 ) -> dict[str, Any]:
     options: dict[str, Any] = {"events": sorted(events)}
     if baseline is not None:
@@ -91,6 +102,8 @@ def _subscribe_payload(
     }
     if params:
         payload["params"] = dict(params)
+    if source_options:
+        payload["source_options"] = dict(source_options)
     return payload
 
 
@@ -124,9 +137,15 @@ class DaemonBackend:
         return _check(response)
 
     def subscribe(
-        self, client_id: str, target: Target, events: frozenset[str], baseline: Any, params: Params
+        self,
+        client_id: str,
+        target: Target,
+        events: frozenset[str],
+        baseline: Any,
+        params: Params,
+        source_options: Mapping[str, Any],
     ) -> tuple[str, int]:
-        response = self._call(_subscribe_payload(client_id, target, events, baseline, params))
+        response = self._call(_subscribe_payload(client_id, target, events, baseline, params, source_options))
         return str(response["subscription_id"]), int(response["cursor"])
 
     def poll(self, client_id: str, cursors: dict[str, int]) -> dict[str, Any]:
@@ -187,9 +206,15 @@ class InProcessBackend:
         return "in-process (--no-daemon), private budget"
 
     def subscribe(
-        self, client_id: str, target: Target, events: frozenset[str], baseline: Any, params: Params
+        self,
+        client_id: str,
+        target: Target,
+        events: frozenset[str],
+        baseline: Any,
+        params: Params,
+        source_options: Mapping[str, Any],
     ) -> tuple[str, int]:
-        response = self._call(_subscribe_payload(client_id, target, events, baseline, params))
+        response = self._call(_subscribe_payload(client_id, target, events, baseline, params, source_options))
         return str(response["subscription_id"]), int(response["cursor"])
 
     def poll(self, client_id: str, cursors: dict[str, int]) -> dict[str, Any]:
@@ -233,8 +258,9 @@ class WatchSettings:
     """What one watch reports and when it ends.
 
     `events` are the kinds reported, lifecycle and threshold kinds included; `subscribed` are the kinds asked of the
-    daemon (default: `events` without the thresholds, which the caller passes via `threshold_kinds`). `params` go
-    with the subscription to the daemon. A `watch_ended` whose reason is in `error_reasons` exits with 1.
+    daemon (default: `events` without the thresholds, which the caller passes via `threshold_kinds`). `params` (secrets
+    such as an API key) and `source_options` (what the source should do for this watcher) go with the subscription
+    to the daemon. A `watch_ended` whose reason is in `error_reasons` exits with 1.
     """
 
     target: Target
@@ -243,6 +269,7 @@ class WatchSettings:
     timeout: float | None = None
     idle_after: float | None = None
     params: Mapping[str, Any] = field(default_factory=dict)
+    source_options: Mapping[str, Any] = field(default_factory=dict)
     threshold_kinds: frozenset[str] = frozenset()
     subscribed: frozenset[str] | None = None
     error_reasons: frozenset[str] = frozenset({NotFound.reason})
@@ -307,7 +334,7 @@ class Watcher:
             baseline = stored.snapshot if stored else None
         s = self.settings
         self._subscription, self._cursor = self.backend.subscribe(
-            self.client_id, s.target, s.subscribed_events, baseline, s.params
+            self.client_id, s.target, s.subscribed_events, baseline, s.params, s.source_options
         )
 
     def _next_seq(self) -> int:

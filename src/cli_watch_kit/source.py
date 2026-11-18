@@ -106,10 +106,21 @@ class PollItem[S]:
     snapshot: S | None
     events: frozenset[str]
     state: dict[str, Any] = field(default_factory=dict, compare=False)
+    options: tuple[Mapping[str, Any], ...] = ()
+    """The source options of every subscriber and parent that sent any, each once, for the source to merge (glab's
+    `--logs` modes, for example). Empty when nobody sent options."""
 
     @property
     def key(self) -> str:
         return self.target.key
+
+
+@dataclass(frozen=True)
+class Wants:
+    """What a parent wants from a child target: event kinds, and source options like a subscriber's."""
+
+    events: frozenset[str]
+    options: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -216,8 +227,14 @@ class Source[S](ABC):
         """A snapshot from :meth:`encode` (a baseline a watcher kept). Raise `ValueError` when it does not fit."""
         return data  # type: ignore[no-any-return]
 
-    def children(self, target: Target, snapshot: S, events: frozenset[str]) -> Mapping[Target, frozenset[str]]:
-        """Other targets whose events this one relays, each with the kinds it wants from them (an MR relays its head
-        pipeline). `events` are the kinds the subscribers of `target` want. A child is polled as a target of its
-        own, in the parent's account, and its events other than the lifecycle ones go into the parent's log too."""
+    def check_options(self, target: Target, options: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Validate the source options a watcher subscribes with, and return them normalized. Raise `ValueError`
+        with a message for the watcher when they cannot work. Default: any options are taken as they are."""
+        return dict(options)
+
+    def children(self, target: Target, snapshot: S, item: PollItem[S]) -> Mapping[Target, frozenset[str] | Wants]:
+        """Other targets whose events this one relays, each with the kinds (and options) it wants from them, such as
+        an MR that relays its head pipeline. `item` says what the subscribers of `target` want. A child is polled
+        as a target of its own, in the parent's account, and its events other than the lifecycle ones go into the
+        parent's log too."""
         return {}

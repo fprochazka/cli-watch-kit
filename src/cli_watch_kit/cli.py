@@ -151,6 +151,7 @@ def run_watch(
     options: WatchOptions,
     *,
     params: Mapping[str, Any] | None = None,
+    source_options: Mapping[str, Any] | None = None,
     enabled_thresholds: Iterable[str] = (),
     timers: Sequence[ClientTimer] = (),
     writer: Callable[[Path, Backend], Writer] | None = None,
@@ -163,7 +164,8 @@ def run_watch(
 ) -> int:
     """Run one watch of `target` to its end and return the exit code: 0, 1 for an error, 2 for a usage error.
 
-    - `params` go with the subscription to the daemon (an API key, for example).
+    - `params` go with the subscription to the daemon (an API key, for example), and so do `source_options`, which
+      the source checks with `Source.check_options` and gets in `PollItem.options` (glab's `--logs` mode).
     - `enabled_thresholds` are the threshold kinds whose option was given; `timers` compute them.
     - `writer` makes the app's resource dir writer from the resource dir and the backend, for extra ops.
     - `sender_name` is what Claude Code shows as the sender (default: `<command> <target key>`), `restart` the
@@ -226,6 +228,7 @@ def run_watch(
         timeout=timeout,
         idle_after=idle_after,
         params=dict(params or {}),
+        source_options=dict(source_options or {}),
         threshold_kinds=frozenset(catalog.thresholds),
     )
     watcher = Watcher(

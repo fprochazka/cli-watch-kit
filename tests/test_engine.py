@@ -270,6 +270,30 @@ def test_each_resource_keeps_its_private_state_until_it_is_released(clock: Clock
     run(scenario())
 
 
+def test_source_options_are_checked_merged_and_passed_on_to_children(clock: Clock) -> None:
+    world = World(items={"a": {"status": "open"}}, boxes={"x": ["a"]})
+    source = FakeSource(world)
+    engine = Engine(source, clock=clock)
+
+    async def scenario() -> None:
+        with pytest.raises(EngineError, match="unsupported options"):
+            await engine.subscribe("client-a", ITEM, ALL_ITEM, options={"detail": "everything"})
+        await engine.subscribe("client-a", ITEM, ALL_ITEM, options={"detail": "full"})
+        await engine.subscribe("client-b", ITEM, ALL_ITEM, options={"detail": "full"})
+        await engine.subscribe("client-c", ITEM, ALL_ITEM)
+        await engine.poll_due_once()
+        assert source.calls[-1].options == {"item a": [{"detail": "full"}]}
+        # A box relays item a and asks for its own options; a new option polls the item again at once.
+        await engine.subscribe("client-d", Target("box", "x"), frozenset({"status_changed"}))
+        await engine.poll_due_once()
+        await engine.poll_due_once()
+        assert source.calls[-1].keys == ["item a"]
+        assert source.calls[-1].options == {"item a": [{"detail": "full"}, {"detail": "brief"}]}
+        assert {"detail": "full"} in [s["options"] for s in engine.status()["subscriptions"]]
+
+    run(scenario())
+
+
 def test_a_filter_that_grows_polls_again_at_once(clock: Clock) -> None:
     world = World(items={"a": {"status": "open"}})
     source = FakeSource(world)
