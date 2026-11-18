@@ -302,3 +302,38 @@ def test_the_cap_follows_the_window_of_the_dimension_that_is_short(clock: Clock)
         assert due is not None and due - now == pytest.approx(70)
 
     asyncio.run(scenario())
+
+
+class SlowSource(FakeSource):
+    """Asks for its target `slow` to be polled again in 600 s, whatever the budget says."""
+
+    def _poll_one(self, world: World, item: PollItem[Snapshot]) -> PollOutcome[Snapshot]:
+        outcome = super()._poll_one(world, item)
+        if item.target.id == "slow" and outcome.error is None:
+            return PollOutcome(outcome.snapshot, outcome.events, next_delay=600.0)
+        return outcome
+
+
+def test_a_new_window_leaves_next_delay_and_error_backoff_alone(clock: Clock) -> None:
+    now = clock()
+    world = world_of("slow", "gone", "c")
+    world.readings = {"requests": {"remaining": 1000, "reset_at": now + 60}}
+    engine = Engine(SlowSource(world), clock=clock, lease_timeout=1e9)
+
+    async def scenario() -> None:
+        await engine.subscribe("client", item("slow"), KINDS)
+        await engine.subscribe("client", item("gone"), KINDS)
+        await engine.poll_due_once()
+        del world.items["gone"]
+        for _ in range(4):
+            clock.advance(10)
+            await engine.poll_due_once()
+        slow_due, gone_due = engine.scheduler.due_at("item slow"), engine.scheduler.due_at("item gone")
+        assert slow_due is not None and gone_due is not None and gone_due - clock() > 20
+        world.readings = {"requests": {"remaining": 1000, "reset_at": clock() + 60}}
+        await engine.subscribe("client", item("c"), KINDS)
+        await engine.poll_due_once()
+        assert engine.scheduler.due_at("item slow") == slow_due
+        assert engine.scheduler.due_at("item gone") == gone_due
+
+    asyncio.run(scenario())

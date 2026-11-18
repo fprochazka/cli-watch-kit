@@ -125,6 +125,8 @@ class Resource:
     failures: int = 0
     polls: int = 0
     interval: float | None = None
+    stretched: bool = False
+    """Whether the budget stretched the delay of the next poll; only such a delay shrinks when a window resets."""
     last_poll_at: float | None = None
     last_error: str | None = None
 
@@ -588,11 +590,13 @@ class Engine:
         """A new window began: bring forward every resource of the account that waits longer than it now has to."""
         for res in self.resources.values():
             due = self.scheduler.due_at(res.rid)
-            if res.account != account_name or res.polling or res.ended or due is None:
+            if res.account != account_name or res.polling or res.ended or due is None or not res.stretched:
+                # Only a wait the budget caused is shortened; a source's next_delay or an error backoff stays.
                 continue
             wanted = now + self._stretched(account_name, self._interval(res), now)
             if due > wanted:
                 self.scheduler.schedule(res.rid, wanted)
+                res.stretched = wanted - now > self._interval(res)
 
     def _exceeds(self, cost: Mapping[str, float]) -> bool:
         cap = self.source.batch_cost_cap or {}
@@ -721,6 +725,9 @@ class Engine:
                 res.interval = self.source.interval(res.target, res.snapshot)
                 base = outcome.next_delay if outcome.next_delay is not None else self._interval(res)
                 delay = self._stretched(res.account, base, now)
+                res.stretched = delay > base
+        if error is not None:
+            res.stretched = False
         if delay is not None and not res.ended:
             self.scheduler.schedule(res.rid, now + delay)
 
