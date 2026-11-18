@@ -30,7 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 claude-code = [
-  "cc-blackbox>=0.11,<0.12",
+  "cc-blackbox>=0.11,<0.13",
 ]
 
 [project.urls]

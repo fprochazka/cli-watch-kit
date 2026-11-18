@@ -58,7 +58,7 @@ def test_an_old_cc_blackbox_falls_back_to_stdout_and_names_the_version_needed(
     monkeypatch.setitem(sys.modules, "cc_blackbox", types.ModuleType("cc_blackbox"))
     monkeypatch.setenv("CLAUDECODE", "1")
     problem = claude.claude_code_problem()
-    assert problem is not None and "does not fit" in problem and "cc-blackbox>=0.11,<0.12" in problem
+    assert problem is not None and "does not fit" in problem and "cc-blackbox>=0.11,<0.13" in problem
     assert claude.find_session() is None
     common: dict[str, Any] = {
         "session": None,

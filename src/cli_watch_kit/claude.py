@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from cli_watch_kit.app import WatchApp
 
 EXTRA = "claude-code"
-REQUIRED = "cc-blackbox>=0.11,<0.12"
+REQUIRED = "cc-blackbox>=0.11,<0.13"
 INSTALL_HINT = "install the claude-code extra of cli-watch-kit (cc-blackbox) to message the session"
 STREAM_MODES: tuple[str, ...] = ("auto", "stdout", "claude-message")
 MESSAGE_PRIORITIES: tuple[str, ...] = ("now", "next", "later")
