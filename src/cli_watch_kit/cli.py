@@ -30,7 +30,7 @@ import click
 from cli_watch_kit.app import WatchApp
 from cli_watch_kit.changelog import Changelog
 from cli_watch_kit.claude import MESSAGE_PRIORITIES, STREAM_MODES, StreamError, find_session, open_stream
-from cli_watch_kit.client import Backend, Watcher, WatchSettings, Writer, default_backend
+from cli_watch_kit.client import Backend, Watcher, WatchSettings, Writer, WriterContext, default_backend
 from cli_watch_kit.daemon.lifecycle import daemon_running, stop_daemon
 from cli_watch_kit.daemon.transport import DaemonFiles, DaemonUnavailable, request
 from cli_watch_kit.durations import format_duration, parse_duration
@@ -155,7 +155,7 @@ def run_watch(
     enabled_thresholds: Iterable[str] = (),
     also_subscribe: Iterable[str] = (),
     timers: Sequence[ClientTimer] = (),
-    writer: Callable[[Path, Backend], Writer] | None = None,
+    writer: Callable[[WriterContext], Writer] | None = None,
     resource_dir: Callable[[Path, Target], Path] = default_resource_dir,
     readme: str | None = None,
     sender_name: str | None = None,
@@ -170,7 +170,7 @@ def run_watch(
     - `enabled_thresholds` are the threshold kinds whose option was given; `timers` compute them. `also_subscribe`
       names kinds the daemon should track although the watcher does not report them, because a timer reads what
       they put into the snapshot (glab's `quiet` reads the head pipeline's status).
-    - `writer` makes the app's resource dir writer from the resource dir and the backend, for extra ops.
+    - `writer` makes the app's writer of the resource dir from a :class:`WriterContext`.
     - `sender_name` is what Claude Code shows as the sender (default: `<command> <target key>`), `restart` the
       command line that watches the same target again (default: `<command> <kind> <id>`), `header` extra header lines.
     """
@@ -245,7 +245,7 @@ def run_watch(
         stream.sink,
         changelog,
         status,
-        writer=writer(changelog.dir, backend) if writer is not None else None,
+        writer=writer(WriterContext(base, changelog.dir, target, backend, status)) if writer is not None else None,
         timers=timers,
     )
     try:

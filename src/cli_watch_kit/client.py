@@ -20,6 +20,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from types import FrameType
 from typing import Any, Protocol
 
@@ -251,6 +252,18 @@ class Writer(Protocol):
     def snapshot(self, data: Any) -> None: ...
 
     def attach(self, events: list[Event]) -> list[Event]: ...
+
+
+@dataclass(frozen=True)
+class WriterContext:
+    """What an app's writer is made from: the base dir and the resource dir of the watch, its target, the backend
+    (for the source's extra ops, such as fetching a log the daemon caches) and the status output."""
+
+    base_dir: Path
+    resource_dir: Path
+    target: Target
+    backend: Backend
+    status: StatusOutput
 
 
 @dataclass(frozen=True)
