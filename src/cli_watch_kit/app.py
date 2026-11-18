@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from cli_watch_kit import __version__ as LIB_VERSION
+from cli_watch_kit.events import Event
 from cli_watch_kit.paths import AppPaths
 from cli_watch_kit.source import Source
 
@@ -38,6 +39,9 @@ class WatchApp:
       dir (`linear-cli`). Default: `name`.
     - `sender`: the sender id of a Claude Code message is `<sender>:<pid>`. Default: `name`. An app that kept the name
       of an older daemon dir sets it to keep the sender id its readers know (glab-watch: `glab-watch`).
+    - `announced`: rewrites the `watch_started` event of the message that names the resource dir, after the library
+      dropped the summary's `dir`. It gets the event and the resource dir; glab-watch makes its threads dir relative.
+      stdout and the changelog keep the full event. Default: no further change.
     - `client_poll_ms`, `lease_timeout`: how often watchers poll the engine and how long a subscription lives
       without a poll. Default: 5000 ms and 20 s. `<PREFIX>CLIENT_POLL_MS` and `<PREFIX>LEASE_TIMEOUT` override both,
       for the daemon and for `--no-daemon` alike.
@@ -54,6 +58,7 @@ class WatchApp:
     env_prefix: str = ""
     files_dir_name: str = ""
     sender: str = ""
+    announced: Callable[[Event, Path], Event] | None = None
     client_poll_ms: int | None = None
     lease_timeout: float | None = None
     _made: dict[str, Source[Any]] = field(default_factory=dict, init=False, compare=False, repr=False)

@@ -151,6 +151,22 @@ def test_only_the_first_watch_started_message_names_the_dir_and_the_changelog(
     sink.close()
 
 
+def test_an_app_can_rewrite_the_announcing_watch_started(receiver: Receiver, clock: Clock, tmp_path: Path) -> None:
+    def relative_files(event: Event, directory: Path) -> Event:
+        files = Path(event.data["summary"]["files"]).relative_to(directory)
+        return replace(event, data={**event.data, "summary": {**event.data["summary"], "files": str(files)}})
+
+    app = replace(APP, announced=relative_files)
+    changelog = tmp_path / "res" / "events.jsonl"
+    envelope = message_envelope(app, RESOURCE, changelog)
+    summary = {"dir": str(tmp_path / "res"), "files": str(tmp_path / "res" / "files")}
+    content = envelope.format([event("watch_started", 1, summary=summary), event("note_added", 2)], announce=True)
+    assert '"summary":{"files":"files"}' in content
+    assert '"summary":{"files":"files"}' not in message_envelope(APP, RESOURCE, changelog).format(
+        [event("watch_started", 1, summary=summary)], announce=True
+    )
+
+
 def test_watch_ended_is_sent_at_once_and_priority_is_passed(receiver: Receiver, clock: Clock, tmp_path: Path) -> None:
     sink = sink_for(receiver, clock, tmp_path / "e.jsonl", "later")
     sink.emit([event("status_changed", 9, to="done"), event("watch_ended", 10, reason="done")])

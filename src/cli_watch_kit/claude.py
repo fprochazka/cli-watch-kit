@@ -148,6 +148,13 @@ def _without_announced_dir(event: Event, directory: Path) -> Event:
     return Event(event.kind, event.resource, event.seq, event.observed_at, {**event.data, "summary": summary})
 
 
+def _announced(app: WatchApp, event: Event, directory: Path) -> Event:
+    event = _without_announced_dir(event, directory)
+    if app.announced is not None and event.kind == WATCH_STARTED:
+        return app.announced(event, directory)
+    return event
+
+
 def message_envelope(app: WatchApp, resource: str, changelog: Path) -> EventEnvelope[Event]:
     """`<tag resource="…" seq="…">`. The message with `watch_started` also names the resource dir and the changelog.
     Above 64 KB the body becomes a count per kind that points at the changelog."""
@@ -159,7 +166,7 @@ def message_envelope(app: WatchApp, resource: str, changelog: Path) -> EventEnve
         payload=_event_payload,
         announce_on=WATCH_STARTED,
         announce_attributes={"dir": str(changelog.parent), "changelog": str(changelog)},
-        announced=lambda event: _without_announced_dir(event, changelog.parent),
+        announced=lambda event: _announced(app, event, changelog.parent),
         record=str(changelog),
     )
 
