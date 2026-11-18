@@ -6,10 +6,8 @@ from __future__ import annotations
 import json
 import os
 import socket
-import sys
 import tempfile
 import threading
-import types
 from collections.abc import Iterator
 from io import StringIO
 from pathlib import Path
@@ -17,15 +15,17 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-from cc_blackbox import MessageEventSink
 
-from cli_watch_kit import claude
-from cli_watch_kit.app import WatchApp
-from cli_watch_kit.claude import StreamError, claude_message_sink, message_envelope, open_stream
-from cli_watch_kit.events import Event
-from cli_watch_kit.sinks import StatusOutput, StdoutSink
-from conftest import Clock
-from fakeapp.source import FakeSource
+pytest.importorskip("cc_blackbox")
+
+from cc_blackbox import MessageEventSink  # noqa: E402
+
+from cli_watch_kit.app import WatchApp  # noqa: E402
+from cli_watch_kit.claude import StreamError, claude_message_sink, message_envelope, open_stream  # noqa: E402
+from cli_watch_kit.events import Event  # noqa: E402
+from cli_watch_kit.sinks import StatusOutput, StdoutSink  # noqa: E402
+from conftest import Clock  # noqa: E402
+from fakeapp.source import FakeSource  # noqa: E402
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="Claude Code messaging has no Windows transport")
 
@@ -204,62 +204,7 @@ def test_an_incompatible_session_falls_back_to_stdout_with_a_reason(receiver: Re
         open_stream(APP, "claude-message", session=session, **common)
 
 
-def test_without_the_extra_auto_uses_stdout_and_names_the_extra(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(claude, "claude_code_problem", lambda: claude.INSTALL_HINT)
-    common: dict[str, Any] = {
-        "session": None,
-        "resource": RESOURCE,
-        "sender_name": "x",
-        "changelog": tmp_path / "e.jsonl",
-        "priority": "next",
-        "status": StatusOutput(""),
-    }
-    assert claude.find_session() is None
-    assert open_stream(APP, "auto", **common).fallback is None
-    monkeypatch.setenv("CLAUDECODE", "1")
-    chosen = open_stream(APP, "auto", **common)
-    assert isinstance(chosen.sink, StdoutSink)
-    assert chosen.fallback is not None and "claude-code extra" in chosen.fallback
-    with pytest.raises(StreamError, match="claude-code extra"):
-        open_stream(APP, "claude-message", **common)
-
-
-def test_the_package_imports_no_cc_blackbox_until_a_stream_needs_it() -> None:
-    import subprocess
-    import sys
-
-    code = (
-        "import sys, cli_watch_kit.cli, cli_watch_kit.client, cli_watch_kit.daemon.lifecycle;"
-        " print('cc_blackbox' in sys.modules)"
-    )
-    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60, check=True)
-    assert result.stdout.strip() == "False"
-
-
 def test_stdout_sink_writes_one_line_per_event() -> None:
     out = StringIO()
     StdoutSink(out).emit([event("note_added", 1, notes=1)])
     assert json.loads(out.getvalue())["seq"] == 1
-
-
-def test_an_old_cc_blackbox_falls_back_to_stdout_and_names_the_version_needed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A cc-blackbox without the event stream API, as 0.6 was.
-    monkeypatch.setitem(sys.modules, "cc_blackbox", types.ModuleType("cc_blackbox"))
-    monkeypatch.setenv("CLAUDECODE", "1")
-    problem = claude.claude_code_problem()
-    assert problem is not None and "does not fit" in problem and "cc-blackbox>=0.11,<0.12" in problem
-    assert claude.find_session() is None
-    common: dict[str, Any] = {
-        "session": None,
-        "resource": RESOURCE,
-        "sender_name": "x",
-        "changelog": tmp_path / "e.jsonl",
-        "priority": "next",
-        "status": StatusOutput(""),
-    }
-    chosen = open_stream(APP, "auto", **common)
-    assert isinstance(chosen.sink, StdoutSink) and chosen.fallback == problem

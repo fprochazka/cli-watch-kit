@@ -47,3 +47,21 @@ jobs:
 
       - name: Run tests
         run: uv run pytest
+
+  test-without-claude-code:
+    name: Test without the claude-code extra
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install dependencies without cc-blackbox
+        run: |
+          uv sync --locked --dev
+          uv pip uninstall cc-blackbox
+
+      - name: Run tests
+        run: uv run --no-sync pytest
