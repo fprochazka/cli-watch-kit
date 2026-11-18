@@ -96,6 +96,7 @@ class Resource:
     snapshot: Any = None
     snapshot_json: Any = None
     snapshot_hash: str | None = None
+    state: dict[str, Any] = field(default_factory=dict)
     log: deque[Event] = field(default_factory=lambda: deque(maxlen=EVENT_LOG_SIZE))
     seq: int = 0
     events: frozenset[str] = frozenset()
@@ -452,7 +453,7 @@ class Engine:
             self._wake.set()
 
     def _item(self, res: Resource) -> PollItem[Any]:
-        return PollItem(res.target, res.snapshot, res.events)
+        return PollItem(res.target, res.snapshot, res.events, res.state)
 
     def _interval(self, res: Resource) -> float:
         if res.interval is None:

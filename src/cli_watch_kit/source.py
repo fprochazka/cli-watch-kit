@@ -95,11 +95,17 @@ class Target:
 @dataclass(frozen=True)
 class PollItem[S]:
     """One target in a poll: the snapshot to diff against (`None` on the first poll without a baseline) and the event
-    kinds any subscriber wants, which a source may use to skip work nobody needs."""
+    kinds any subscriber wants, which a source may use to skip work nobody needs.
+
+    `state` is the resource's private scratch space for what is not part of the snapshot (an ETag, work held back
+    for a later poll, a stateful poller object). It is the same dict on every poll of the resource, starts empty
+    (also after a daemon restart), and goes away with the resource.
+    """
 
     target: Target
     snapshot: S | None
     events: frozenset[str]
+    state: dict[str, Any] = field(default_factory=dict, compare=False)
 
     @property
     def key(self) -> str:

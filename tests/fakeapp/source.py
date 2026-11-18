@@ -168,6 +168,7 @@ class FakeSource(Source[Snapshot]):
 
     def _poll_one(self, world: World, item: PollItem[Snapshot]) -> PollOutcome[Snapshot]:
         target = item.target
+        item.state["polls"] = item.state.get("polls", 0) + 1
         if target.kind == "box":
             if target.id not in world.boxes:
                 return PollOutcome(error=NotFound(f"no box {target.id}"))

@@ -254,6 +254,22 @@ def test_accounts_keep_resources_and_budgets_apart_and_get_their_params(clock: C
     run(scenario())
 
 
+def test_each_resource_keeps_its_private_state_until_it_is_released(clock: Clock) -> None:
+    engine = Engine(FakeSource(World(items={"a": {}})), clock=clock)
+
+    async def scenario() -> None:
+        sub = await engine.subscribe("client-a", ITEM, ALL_ITEM)
+        await engine.poll_due_once()
+        clock.advance(10)
+        await engine.poll_due_once()
+        assert engine.resources[ITEM.key].state == {"polls": 2}
+        engine.unsubscribe("client-a", sub["subscription_id"])
+        await engine.subscribe("client-a", ITEM, ALL_ITEM)
+        assert engine.resources[ITEM.key].state == {}
+
+    run(scenario())
+
+
 def test_a_filter_that_grows_polls_again_at_once(clock: Clock) -> None:
     world = World(items={"a": {"status": "open"}})
     source = FakeSource(world)
