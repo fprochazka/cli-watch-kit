@@ -369,7 +369,9 @@ def test_killing_a_watchers_whole_process_tree_leaves_the_shared_daemon_running(
     first = _watch([*common, "--base-dir", str(daemon_env.root / "c1")], daemon_env.env())
     assert first.stdout is not None and json.loads(first.stdout.readline())["kind"] == "watch_started"
     daemon_pid = daemon_request(daemon_env.files, {"op": "hello"})["pid"]
-    assert daemon_pid not in _descendants(first.pid)
+    # The launcher exits right after the daemon is ready, but its interpreter takes a moment to shut down; until
+    # then the daemon is still its child.
+    wait_for(lambda: daemon_pid not in _descendants(first.pid), 10, "the launcher to let go of the daemon")
 
     second = _watch([*common, "--timeout=4s", "--base-dir", str(daemon_env.root / "c2")], daemon_env.env())
     assert second.stdout is not None and json.loads(second.stdout.readline())["kind"] == "watch_started"
