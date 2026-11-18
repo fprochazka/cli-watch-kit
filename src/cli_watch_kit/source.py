@@ -118,10 +118,17 @@ class PollItem[S]:
 
 @dataclass(frozen=True)
 class Wants:
-    """What a parent wants from a child target: event kinds, and source options like a subscriber's."""
+    """What a parent wants from a child target: event kinds, and source options like a subscriber's.
+
+    `baseline` is the child's snapshot as the parent's snapshot knows it, in the child's :meth:`Source.encode` form.
+    A new child starts from it, so after a daemon restart the child's first poll reports what changed in the gap
+    instead of being a silent baseline poll. It works only when the parent's snapshot embeds the child state that
+    the relayed events depend on; without it the changes of a child during a restart are not reported.
+    """
 
     events: frozenset[str]
     options: Mapping[str, Any] = field(default_factory=dict)
+    baseline: Any = None
 
 
 @dataclass(frozen=True)

@@ -561,3 +561,48 @@ def test_a_subscribe_whose_children_fail_leaves_no_orphan_behind(clock: Clock) -
         assert engine.resources["box x"].events == frozenset({"box_changed", *LIFECYCLE_KINDS})
 
     run(scenario())
+
+
+BOX = Target("box", "x")
+BOX_KINDS = frozenset({"status_changed", "note_added", "box_changed"})
+OLD_BOX = {"items": ["a"], "states": {"a": {"status": "open", "notes": 0}}}
+
+
+def test_a_relayed_child_reports_its_gap_after_a_restart(clock: Clock) -> None:
+    engine = Engine(FakeSource(World(items={"a": {"status": "review"}}, boxes={"x": ["a"]})), clock=clock)
+
+    async def scenario() -> None:
+        first = await engine.subscribe("A", BOX, BOX_KINDS, baseline=OLD_BOX)
+        for _ in range(3):
+            await engine.poll_due_once()
+        assert kinds(engine.poll("A", {first["subscription_id"]: first["cursor"]}), first["subscription_id"]) == [
+            "watch_started",
+            "status_changed",
+        ]
+        # A second resubscriber, after the box and its item were polled, gets the item's gap too.
+        second = await engine.subscribe("B", BOX, BOX_KINDS, baseline=OLD_BOX)
+        gap = events_of(engine.poll("B", {second["subscription_id"]: second["cursor"]}), second["subscription_id"])
+        assert [e["kind"] for e in gap] == ["watch_started", "status_changed"]
+        assert gap[1]["resource"] == "box x" and gap[1]["data"]["to"] == "review"
+
+    run(scenario())
+
+
+def test_two_resubscribers_with_different_baselines_each_get_their_own_gap(clock: Clock) -> None:
+    engine = Engine(FakeSource(World(items={"a": {"status": "review", "notes": 2}})), clock=clock)
+
+    async def scenario() -> None:
+        a = await engine.subscribe("A", ITEM, ALL_ITEM, baseline={"status": "open", "notes": 2})
+        b = await engine.subscribe("B", ITEM, ALL_ITEM, baseline={"status": "open", "notes": 0})
+        await engine.poll_due_once()
+        assert kinds(engine.poll("A", {a["subscription_id"]: a["cursor"]}), a["subscription_id"]) == [
+            "watch_started",
+            "status_changed",
+        ]
+        assert kinds(engine.poll("B", {b["subscription_id"]: b["cursor"]}), b["subscription_id"]) == [
+            "watch_started",
+            "status_changed",
+            "note_added",
+        ]
+
+    run(scenario())

@@ -97,6 +97,10 @@ class Subscription:
     """Private events of the last answer, sent again until the watcher acknowledges that answer."""
     unacked_snapshot_hash: str | None = None
     answer: int = 0
+    own_baseline: Any = None
+    """A baseline that differs from the one its resource was seeded with, to diff at the first poll."""
+    skip_until: int = 0
+    """Log events up to this seq are covered by the subscription's own diff."""
 
 
 @dataclass
@@ -214,9 +218,18 @@ class Engine:
             account.params = params
         now = self.lease_clock()
         res = self._acquire(account_name, target)
-        if baseline is not None and not res.polled and res.snapshot is None:
-            self._seed(res, baseline)
+        previous = self._decode(res, baseline) if baseline is not None else None
+        own_baseline = None
+        seeded = False
+        if previous is not None and not res.polled:
+            if res.snapshot is None:
+                self._set_snapshot(res, previous)
+                seeded = True
+            elif stable_hash(self.source.encode(previous)) != res.snapshot_hash:
+                # Another resubscriber seeded the resource with another baseline: this one gets its own diff.
+                own_baseline = previous
         sub = Subscription(uuid.uuid4().hex, client_id, res.rid, events | frozenset(LIFECYCLE_KINDS), now, checked)
+        sub.own_baseline = own_baseline
         self.subscriptions[sub.id] = sub
         res.subscriptions.add(sub.id)
         self._idle_since = None
@@ -224,13 +237,17 @@ class Engine:
         if res.polled:
             sub.private.append(self._started_event(res))
             sub.started = True
-            if baseline is not None:
-                sub.private.extend(self._gap_events(res, baseline, sub.events))
+            if previous is not None:
+                sub.private.extend(self._gap_events(res, previous, sub.events))
         if res.end_event is not None:
             sub.private.append(res.end_event)
         wants = (res.events, res.options)
         try:
             self._recompute_wants(res)
+            if seeded:
+                # The children start from the seeded snapshot too, so their gap is reported as well. This runs once
+                # the subscription counts, so the children know which kinds it wants from them.
+                self._reconcile_children(res)
         except Exception:
             # The source's children() failed: take the subscription back, so no orphan keeps the resource alive.
             self.subscriptions.pop(sub.id, None)
@@ -273,7 +290,7 @@ class Engine:
             sub.unacked.extend(sub.private)
             sub.private.clear()
             batch = list(sub.unacked)
-            batch.extend(e for e in res.log if e.seq > cursor and e.kind in sub.events)
+            batch.extend(e for e in res.log if e.seq > max(cursor, sub.skip_until) and e.kind in sub.events)
             if batch:
                 events[sid] = [e.to_json() for e in batch]
             sub.unacked_snapshot_hash = None
@@ -478,22 +495,40 @@ class Engine:
         for rid, (target, kinds) in wanted.items():
             child = self._acquire(res.account, target)
             res.children.add(rid)
+            if kinds.baseline is not None and not child.polled and child.snapshot is None:
+                self._seed(child, kinds.baseline)
             if child.parents.get(res.rid) != kinds:
                 child.parents[res.rid] = kinds
                 self._recompute_wants(child)
 
-    def _gap_events(self, res: Resource, baseline: Any, kinds: frozenset[str]) -> list[Event]:
-        """What changed between a resubscribing watcher's baseline and the snapshot the resource has now."""
+    def _gap_events(self, res: Resource, previous: Any, kinds: frozenset[str]) -> list[Event]:
+        """What changed between a resubscribing watcher's baseline (decoded) and the snapshot the resource has now,
+        including what its children changed, as far as the baseline embeds their state (see `Wants.baseline`)."""
+        raws: list[RawEvent] = []
         try:
-            previous = self.source.decode(res.target, baseline)
             if stable_hash(self.source.encode(previous)) == res.snapshot_hash:
                 return []
-            raws = self.source.diff(res.target, previous, res.snapshot, kinds)
+            raws.extend(self.source.diff(res.target, previous, res.snapshot, kinds))
+            then = PollItem(res.target, previous, kinds, res.state, res.options)
+            for target, wants in self.source.children(res.target, previous, then).items():
+                child = self.resources.get(self._rid(res.account, target))
+                if not isinstance(wants, Wants) or wants.baseline is None or child is None or child.snapshot is None:
+                    continue
+                before = self.source.decode(target, wants.baseline)
+                if stable_hash(self.source.encode(before)) != child.snapshot_hash:
+                    raws.extend(self.source.diff(target, before, child.snapshot, wants.events & kinds))
         except Exception:
             log.exception("diffing the baseline of %s failed", res.rid)
-            return []
         observed = utc_now_iso()
         return [Event(r.kind, res.key, res.seq, observed, dict(r.data), r.artifacts) for r in raws if r.kind in kinds]
+
+    def _decode(self, res: Resource, baseline: Any) -> Any:
+        """A watcher's baseline as a snapshot, or `None` when the source cannot read it."""
+        try:
+            return self.source.decode(res.target, baseline)
+        except Exception as exc:
+            log.info("ignoring the baseline of %s: %s", res.rid, exc)
+            return None
 
     def _seed(self, res: Resource, baseline: Any) -> None:
         """Start from a snapshot a watcher kept from an earlier daemon, so the first poll reports what changed."""
@@ -728,6 +763,12 @@ class Engine:
                     if not sub.started:
                         sub.private.append(self._started_event(res))
                         sub.started = True
+                    if sub.own_baseline is not None:
+                        # Its baseline differs from the one the resource was seeded with: the events in the log
+                        # are relative to the other one, so it gets its own diff instead.
+                        sub.private.extend(self._gap_events(res, sub.own_baseline, sub.events))
+                        sub.own_baseline = None
+                        sub.skip_until = res.seq
             if outcome.ended is not None:
                 data = dict(outcome.end_data)
                 if first and baseline:

@@ -178,20 +178,28 @@ class FakeSource(Source[Snapshot]):
         if target.kind == "box":
             if target.id not in world.boxes:
                 return PollOutcome(error=NotFound(f"no box {target.id}"))
-            box: Snapshot = {"items": list(world.boxes[target.id])}
+            # A box embeds the state of its items, so a new child item can start from it (see Wants.baseline).
+            ids = list(world.boxes[target.id])
+            states = {i: self._item_state(world.items[i]) for i in ids if i in world.items}
+            box: Snapshot = {"items": ids, "states": states}
             events = []
-            if item.snapshot is not None and item.snapshot != box and "box_changed" in item.events:
-                events.append(RawEvent("box_changed", {"items": box["items"]}))
+            changed = item.snapshot is not None and item.snapshot.get("items") != ids
+            if changed and "box_changed" in item.events:
+                events.append(RawEvent("box_changed", {"items": ids}))
             return PollOutcome(box, events)
         state = world.items.get(target.id)
         if state is None:
             return PollOutcome(error=NotFound(f"no item {target.id}"))
-        snapshot: Snapshot = {"status": state.get("status", "open"), "notes": int(state.get("notes", 0))}
+        snapshot = self._item_state(state)
         previous = item.snapshot
         raw = list(self.diff(target, previous, snapshot, item.events)) if previous is not None else []
         if snapshot["status"] == "done":
             return PollOutcome(snapshot, raw, ended="done", end_data={"status": "done"})
         return PollOutcome(snapshot, raw)
+
+    @staticmethod
+    def _item_state(state: Mapping[str, Any]) -> Snapshot:
+        return {"status": state.get("status", "open"), "notes": int(state.get("notes", 0))}
 
     def diff(self, target: Target, previous: Snapshot, current: Snapshot, events: frozenset[str]) -> list[RawEvent]:
         raw: list[RawEvent] = []
@@ -226,8 +234,9 @@ class FakeSource(Source[Snapshot]):
     ) -> Mapping[Target, frozenset[str] | Wants]:
         if target.kind != "box":
             return {}
-        wanted = Wants(item.events & {"status_changed", "note_added"}, {"detail": "brief"})
-        return {Target("item", i): wanted for i in snapshot.get("items", [])}
+        kinds = item.events & {"status_changed", "note_added"}
+        states = snapshot.get("states", {})
+        return {Target("item", i): Wants(kinds, {"detail": "brief"}, states.get(i)) for i in snapshot.get("items", [])}
 
 
 def source_from_env() -> FakeSource:
