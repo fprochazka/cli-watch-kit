@@ -60,10 +60,16 @@ def uid_suffix() -> str:
 
 @dataclass(frozen=True)
 class AppPaths:
-    """Where an app named `name` keeps its files. `env_prefix` is the prefix of its override variables."""
+    """Where an app named `name` keeps its files. `env_prefix` is the prefix of its override variables.
+    `files_dir_name` names the dir of the watchers' files (default: `name`); the daemon's state dir keeps `name`."""
 
     name: str
     env_prefix: str
+    files_dir_name: str = ""
+
+    @property
+    def files_name(self) -> str:
+        return self.files_dir_name or self.name
 
     @property
     def base_dir_env(self) -> str:
@@ -77,8 +83,8 @@ class AppPaths:
         """The dir the watchers write their resource dirs under.
 
         `override` wins, then `<PREFIX>BASE_DIR`. Under a Claude Code session with a scratchpad it is
-        `<scratchpad>/<name>`, which Claude Code removes after a while. Otherwise `<temp dir>/<name>-<uid>`, private to
-        the user, which the OS cleans.
+        `<scratchpad>/<files_dir_name>`, which Claude Code removes after a while. Otherwise
+        `<temp dir>/<files_dir_name>-<uid>`, private to the user, which the OS cleans.
         """
         if override is not None:
             return override
@@ -86,8 +92,8 @@ class AppPaths:
         if env:
             return Path(env)
         if scratchpad is not None:
-            return scratchpad / self.name
-        return ensure_private_dir(Path(tempfile.gettempdir()) / f"{self.name}-{uid_suffix()}")
+            return scratchpad / self.files_name
+        return ensure_private_dir(Path(tempfile.gettempdir()) / f"{self.files_name}-{uid_suffix()}")
 
     def state_dir(self) -> Path:
         """The per-user dir holding the daemon's lock, socket (or port file) and log."""

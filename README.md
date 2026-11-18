@@ -90,6 +90,7 @@ APP = WatchApp(
     status_prefix="my-cli watch: ",
     envelope_tag="my-cli-watcher",
     command="my-cli watch",
+    files_dir_name="my-cli",  # <scratchpad>/my-cli/issue/ABC-123/events.jsonl; default: the name
 )
 
 

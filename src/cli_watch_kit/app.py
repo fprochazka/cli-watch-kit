@@ -34,6 +34,8 @@ class WatchApp:
     - `envelope_tag`: the tag of a Claude Code message (`linear-watcher`).
     - `command`: how a user runs the watch command, for hints (`linear watch`). Default: `name`.
     - `env_prefix`: the prefix of the override variables. Default: `name` in upper case with `_`, plus `_`.
+    - `files_dir_name`: the name of the dir the watchers' files go under, in the session scratchpad or the temp
+      dir (`linear-cli`). Default: `name`.
     """
 
     name: str
@@ -45,6 +47,7 @@ class WatchApp:
     envelope_tag: str
     command: str = ""
     env_prefix: str = ""
+    files_dir_name: str = ""
     _made: dict[str, Source[Any]] = field(default_factory=dict, init=False, compare=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -65,7 +68,7 @@ class WatchApp:
 
     @property
     def paths(self) -> AppPaths:
-        return AppPaths(self.name, self.env_prefix)
+        return AppPaths(self.name, self.env_prefix, self.files_dir_name or self.name)
 
     def env(self, name: str) -> str:
         """The name of one of the app's environment variables."""

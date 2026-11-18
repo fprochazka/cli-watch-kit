@@ -7,9 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from cli_watch_kit.app import WatchApp
 from cli_watch_kit.atomic import atomic_write_json
 from cli_watch_kit.locks import FileLock, LockTimeout
 from cli_watch_kit.paths import AppPaths, sanitize_part
+from fakeapp.source import FakeSource
 
 HOLDER = """
 import sys, time
@@ -65,6 +67,16 @@ def test_app_paths_follow_their_overrides(tmp_path: Path, monkeypatch: pytest.Mo
     assert paths.base_dir(tmp_path / "o", tmp_path / "pad") == tmp_path / "o"
     monkeypatch.setenv("DEMO_WATCH_BASE_DIR", str(tmp_path / "b"))
     assert paths.base_dir(scratchpad=tmp_path / "pad") == tmp_path / "b"
+
+
+def test_an_app_names_its_files_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DEMO_WATCH_BASE_DIR", raising=False)
+    monkeypatch.setenv("DEMO_WATCH_STATE_DIR", str(tmp_path / "s"))
+    app = WatchApp("demo-watch", FakeSource(), "demo.daemon", 1, "0", "demo: ", "demo", files_dir_name="demo-cli")
+    assert app.paths.base_dir(scratchpad=tmp_path / "pad") == tmp_path / "pad" / "demo-cli"
+    assert app.paths.state_dir() == tmp_path / "s"
+    plain = WatchApp("demo-watch", FakeSource(), "demo.daemon", 1, "0", "demo: ", "demo")
+    assert plain.paths.base_dir(scratchpad=tmp_path / "pad") == tmp_path / "pad" / "demo-watch"
 
 
 def test_sanitize_part_keeps_a_path_component_safe() -> None:
