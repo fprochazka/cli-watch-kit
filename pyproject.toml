@@ -1,0 +1,81 @@
+[project]
+name = "cli-watch-kit"
+dynamic = ["version"]
+description = "Build a `watch` command for a CLI: poll a source, report changes as JSON events, share one rate-limited daemon between all watchers"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Filip Procházka", email = "dev@fprochazka.cz" }]
+keywords = ["watch", "polling", "daemon", "cli", "click", "events", "claude-code", "ai-agent"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
+requires-python = ">=3.12"
+dependencies = [
+  "click>=8.1,<9",
+]
+
+[project.optional-dependencies]
+claude-code = [
+  "cc-blackbox>=0.11,<0.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/fprochazka/cli-watch-kit"
+Repository = "https://github.com/fprochazka/cli-watch-kit"
+Issues = "https://github.com/fprochazka/cli-watch-kit/issues"
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+# Without a tag yet (a fresh clone, or before the first release), hatch-vcs still needs a version to start from.
+fallback_version = "0.0.0"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cli_watch_kit"]
+
+[dependency-groups]
+dev = [
+  "cc-blackbox>=0.11,<0.12",
+  "mypy>=1.15",
+  "pytest>=8.0",
+  "ruff>=0.14",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+mypy_path = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
