@@ -217,7 +217,10 @@ class Source[S](ABC):
     async def account(self, target: Target, params: Params) -> str:
         """Whose budget polls of `target` spend. Called on subscribe; raise :class:`Unauthorized` for bad params.
 
-        The default is one account for everything."""
+        The params of the latest subscription of an account replace those of the earlier ones for every poll of the
+        account, so check them here, for example by resolving the user an API key belongs to: a subscription with a
+        wrong key that got through would break the account's other watchers. The default is one account for
+        everything."""
         return ""
 
     def batch_key(self, target: Target) -> Hashable | None:
