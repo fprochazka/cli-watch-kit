@@ -6,8 +6,10 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sys
 import tempfile
 import threading
+import types
 from collections.abc import Iterator
 from io import StringIO
 from pathlib import Path
@@ -205,7 +207,7 @@ def test_an_incompatible_session_falls_back_to_stdout_with_a_reason(receiver: Re
 def test_without_the_extra_auto_uses_stdout_and_names_the_extra(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(claude, "claude_code_available", lambda: False)
+    monkeypatch.setattr(claude, "claude_code_problem", lambda: claude.INSTALL_HINT)
     common: dict[str, Any] = {
         "session": None,
         "resource": RESOURCE,
@@ -240,3 +242,24 @@ def test_stdout_sink_writes_one_line_per_event() -> None:
     out = StringIO()
     StdoutSink(out).emit([event("note_added", 1, notes=1)])
     assert json.loads(out.getvalue())["seq"] == 1
+
+
+def test_an_old_cc_blackbox_falls_back_to_stdout_and_names_the_version_needed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A cc-blackbox without the event stream API, as 0.6 was.
+    monkeypatch.setitem(sys.modules, "cc_blackbox", types.ModuleType("cc_blackbox"))
+    monkeypatch.setenv("CLAUDECODE", "1")
+    problem = claude.claude_code_problem()
+    assert problem is not None and "does not fit" in problem and "cc-blackbox>=0.11,<0.12" in problem
+    assert claude.find_session() is None
+    common: dict[str, Any] = {
+        "session": None,
+        "resource": RESOURCE,
+        "sender_name": "x",
+        "changelog": tmp_path / "e.jsonl",
+        "priority": "next",
+        "status": StatusOutput(""),
+    }
+    chosen = open_stream(APP, "auto", **common)
+    assert isinstance(chosen.sink, StdoutSink) and chosen.fallback == problem

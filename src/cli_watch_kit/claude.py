@@ -19,6 +19,7 @@ import os
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from importlib import metadata
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from cli_watch_kit.app import WatchApp
 
 EXTRA = "claude-code"
+REQUIRED = "cc-blackbox>=0.11,<0.12"
 INSTALL_HINT = "install the claude-code extra of cli-watch-kit (cc-blackbox) to message the session"
 STREAM_MODES: tuple[str, ...] = ("auto", "stdout", "claude-message")
 MESSAGE_PRIORITIES: tuple[str, ...] = ("now", "next", "later")
@@ -40,13 +42,42 @@ class StreamError(RuntimeError):
     pass
 
 
+def claude_code_problem() -> str | None:
+    """Why the `claude-code` extra cannot be used, or `None` when it can: cc-blackbox is missing, or another
+    version than the extra pins is installed and lacks what this module imports."""
+    try:
+        missing = importlib.util.find_spec("cc_blackbox") is None
+    except ValueError:  # imported already, without a spec
+        missing = False
+    if missing:
+        return INSTALL_HINT
+    try:
+        from cc_blackbox import (  # noqa: F401
+            EventEnvelope,
+            EventStreamMode,
+            MessageEventSink,
+            MessagingUnavailable,
+            choose_event_stream,
+            current_session_or_none,
+        )
+    except ImportError:
+        try:
+            found = metadata.version("cc-blackbox")
+        except metadata.PackageNotFoundError:
+            found = "of an unknown version"
+        return (
+            f"the installed cc-blackbox {found} does not fit; the claude-code extra of cli-watch-kit needs {REQUIRED}"
+        )
+    return None
+
+
 def claude_code_available() -> bool:
-    """Whether the `claude-code` extra is installed."""
-    return importlib.util.find_spec("cc_blackbox") is not None
+    """Whether the `claude-code` extra is installed and fits."""
+    return claude_code_problem() is None
 
 
 def find_session() -> ActiveSession | None:
-    """The Claude Code session this process runs under, or `None`, also when the extra is not installed."""
+    """The Claude Code session this process runs under, or `None`, also when the extra is not usable."""
     if not claude_code_available():
         return None
     from cc_blackbox import current_session_or_none
@@ -83,10 +114,11 @@ def open_stream(
         raise StreamError(f"--message-priority must be one of {', '.join(MESSAGE_PRIORITIES)}")
     if mode == "stdout":
         return Stream(StdoutSink())
-    if not claude_code_available():
+    problem = claude_code_problem()
+    if problem is not None:
         if mode == "claude-message":
-            raise StreamError(f"--events-stream=claude-message is not possible: {INSTALL_HINT}")
-        return Stream(StdoutSink(), INSTALL_HINT if _under_claude_code() else None)
+            raise StreamError(f"--events-stream=claude-message is not possible: {problem}")
+        return Stream(StdoutSink(), problem if _under_claude_code() else None)
     from cc_blackbox import EventStreamMode, MessagingUnavailable, choose_event_stream
 
     try:
