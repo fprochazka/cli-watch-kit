@@ -19,7 +19,7 @@ from cli_watch_kit.changelog import Changelog
 from cli_watch_kit.cli import WatchOptions
 from cli_watch_kit.client import BackendError, InProcessBackend, Watcher, WatchSettings, WriterContext
 from cli_watch_kit.events import Event
-from cli_watch_kit.locks import LockTimeout
+from cli_watch_kit.locks import FileLock, LockTimeout
 from cli_watch_kit.sinks import StatusOutput, StdoutSink
 from cli_watch_kit.source import Params, Target
 from fakeapp.source import FakeSource, World
@@ -337,3 +337,18 @@ def test_a_refused_resubscribe_that_cannot_pass_ends_the_watch(tmp_path: Path) -
     )
     assert watcher.run() == 1
     assert "test: error: the token was refused" in status.getvalue()
+
+
+def test_a_second_watcher_of_the_same_resource_dir_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "default_backend", lambda app, no_daemon: ScriptedBackend([]))
+    app = WatchApp("inproc", FakeSource(), "unused.daemon", 1, "0", "inproc: ", "inproc-watcher")
+    options = WatchOptions(timeout="1s", events_stream="stdout", base_dir=tmp_path)
+    (tmp_path / "item" / "a").mkdir(parents=True)
+    with FileLock(tmp_path / "item" / "a" / cli.DIR_LOCK) as first:
+        assert first.try_acquire()
+        assert cli.run_watch(app, TARGET, options) == 1
+        assert "another watcher already watches item a into" in capsys.readouterr().err
+    assert not (tmp_path / "item" / "a" / "events.jsonl").exists()
+    assert cli.run_watch(app, TARGET, options) == 0

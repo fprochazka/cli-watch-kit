@@ -117,7 +117,7 @@ if __name__ == "__main__":
     main(APP)
 ```
 
-`run_watch` also takes `enabled_thresholds` and `timers` (the app's `ClientTimer`s for threshold kinds), `also_subscribe` (kinds the daemon should track for a timer without the watcher reporting them), a `writer` factory for the app's own files in the resource dir (it gets a `WriterContext` with the base and resource dirs, the target, the backend for extra ops and the status output), `resource_dir`, `readme`, `sender_name`, `restart` and extra `header` lines. A CLI on another framework fills a `WatchOptions` itself, or uses `cli_watch_kit.client.Watcher` directly.
+`run_watch` also takes `enabled_thresholds` and `timers` (the app's `ClientTimer`s for threshold kinds), `also_subscribe` (kinds the daemon should track for a timer without the watcher reporting them), a `writer` factory for the app's own files in the resource dir (it gets a `WriterContext` with the base and resource dirs, the target, the backend for extra ops and the status output), `resource_dir`, `readme`, `sender_name`, `restart` and extra `header` lines. Only one watcher at a time writes a resource dir: a second watcher of the same target into the same base dir exits with 1 and says so, and runs with its own `--base-dir`. A CLI on another framework fills a `WatchOptions` itself, or uses `cli_watch_kit.client.Watcher` directly.
 
 An app with requests the daemon should serve within the budget (fetching a log for a watcher, for example) puts them in `Source.ops`; a watcher calls them with `backend.call(op, payload, params)`. A source whose targets relay other targets (an MR and its head pipeline) returns them from `Source.children`.
 

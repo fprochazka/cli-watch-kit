@@ -35,12 +35,15 @@ from cli_watch_kit.daemon.lifecycle import daemon_running, stop_daemon
 from cli_watch_kit.daemon.transport import DaemonFiles, DaemonUnavailable, request
 from cli_watch_kit.durations import format_duration, parse_duration
 from cli_watch_kit.events import LIFECYCLE_KINDS, FilterError
+from cli_watch_kit.locks import FileLock
 from cli_watch_kit.paths import sanitize_part
 from cli_watch_kit.sinks import Sink, StatusOutput
 from cli_watch_kit.source import Target
 from cli_watch_kit.timers import ClientTimer
 
 EXIT_USAGE = 2
+DIR_LOCK = ".watcher.lock"
+"""The lock file in a resource dir that keeps a second watcher of the same resource out of it."""
 
 
 @dataclass(frozen=True)
@@ -171,6 +174,8 @@ def run_watch(
       names kinds the daemon should track although the watcher does not report them, because a timer reads what
       they put into the snapshot (glab's `quiet` reads the head pipeline's status).
     - `writer` makes the app's writer of the resource dir from a :class:`WriterContext`.
+    - Only one watcher at a time writes a resource dir. A second watcher of the same target into the same base dir
+      exits with 1 and says so; give it its own `--base-dir` to run both.
     - `sender_name` is what Claude Code shows as the sender (default: `<command> <target key>`), `restart` the
       command line that watches the same target again (default: `<command> <kind> <id>`), `header` extra header lines.
     """
@@ -206,52 +211,65 @@ def run_watch(
     except (FilterError, StreamError, _Usage) as exc:
         status.line(f"error: {exc}")
         return exc.code if isinstance(exc, _Usage) else EXIT_USAGE
-    try:
-        backend = default_backend(app, options.no_daemon)
-    except (DaemonUnavailable, TimeoutError) as exc:
-        status.line(f"error: cannot start the daemon: {exc}; retry with --no-daemon to poll without it")
+    # One watcher per resource dir: two would interleave their seq numbers in one events.jsonl and overwrite each
+    # other's baseline. The OS releases the lock when the watcher dies.
+    changelog.dir.mkdir(parents=True, exist_ok=True)
+    dir_lock = FileLock(changelog.dir / DIR_LOCK)
+    if not dir_lock.try_acquire():
+        status.line(
+            f"error: another watcher already watches {target.key} into {changelog.dir}; stop that one first, or give"
+            " this one its own --base-dir"
+        )
         return 1
-    thresholds = [d for t in timers if (d := t.describe())]
-    print_header(
-        status,
-        app,
-        target,
-        stream.sink,
-        changelog,
-        selected,
-        backend,
-        until=options.until,
-        timeout=options.timeout,
-        idle_after=idle_after,
-        fallback=stream.fallback,
-        thresholds=thresholds,
-        restart=restart or f"{app.command} {target.kind} {target.id}",
-        extra=header,
-    )
-    settings = WatchSettings(
-        target,
-        selected,
-        until=options.until,
-        timeout=timeout,
-        idle_after=idle_after,
-        params=dict(params or {}),
-        source_options=dict(source_options or {}),
-        threshold_kinds=frozenset(catalog.thresholds),
-        subscribed=catalog.daemon_kinds(selected) | catalog.daemon_kinds(extra),
-    )
-    watcher = Watcher(
-        settings,
-        backend,
-        stream.sink,
-        changelog,
-        status,
-        writer=writer(WriterContext(base, changelog.dir, target, backend, status)) if writer is not None else None,
-        timers=timers,
-    )
     try:
-        return watcher.run()
+        try:
+            backend = default_backend(app, options.no_daemon)
+        except (DaemonUnavailable, TimeoutError) as exc:
+            status.line(f"error: cannot start the daemon: {exc}; retry with --no-daemon to poll without it")
+            return 1
+        thresholds = [d for t in timers if (d := t.describe())]
+        print_header(
+            status,
+            app,
+            target,
+            stream.sink,
+            changelog,
+            selected,
+            backend,
+            until=options.until,
+            timeout=options.timeout,
+            idle_after=idle_after,
+            fallback=stream.fallback,
+            thresholds=thresholds,
+            restart=restart or f"{app.command} {target.kind} {target.id}",
+            extra=header,
+        )
+        settings = WatchSettings(
+            target,
+            selected,
+            until=options.until,
+            timeout=timeout,
+            idle_after=idle_after,
+            params=dict(params or {}),
+            source_options=dict(source_options or {}),
+            threshold_kinds=frozenset(catalog.thresholds),
+            subscribed=catalog.daemon_kinds(selected) | catalog.daemon_kinds(extra),
+        )
+        watcher = Watcher(
+            settings,
+            backend,
+            stream.sink,
+            changelog,
+            status,
+            writer=writer(WriterContext(base, changelog.dir, target, backend, status)) if writer is not None else None,
+            timers=timers,
+        )
+        try:
+            return watcher.run()
+        finally:
+            backend.close()
     finally:
-        backend.close()
+        dir_lock.release()
 
 
 def print_header(
