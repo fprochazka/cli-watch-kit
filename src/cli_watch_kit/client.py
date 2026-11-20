@@ -64,6 +64,30 @@ class _Interrupted(Exception):
     """Raised by the signal handler out of a write that blocks, so a stop is not stuck behind it."""
 
 
+class _Wakeup:
+    """What the watcher sleeps on between polls, and what a stop sets to end that sleep early.
+
+    A `threading.Event` cannot do this, because the stop comes from a signal handler. `Event.set` and `Event.wait`
+    take the event's lock, which is not reentrant, and Python runs a signal handler in the main thread between two
+    bytecodes. A handler that runs while the main thread holds that lock (inside `wait`, or inside the `set` of a
+    handler one signal earlier) waits for it forever. Here the lock itself is the flag: locked means not set, and
+    `set` is one release, which never waits for anything.
+    """
+
+    def __init__(self) -> None:
+        self._unset = threading.Lock()
+        self._unset.acquire()
+
+    def set(self) -> None:
+        with contextlib.suppress(RuntimeError):  # already set
+            self._unset.release()
+
+    def wait(self, timeout: float) -> None:
+        """Return when it is set, or after `timeout` seconds. Once set, it stays set."""
+        if self._unset.acquire(timeout=timeout):
+            self.set()
+
+
 class BackendError(RuntimeError):
     """The daemon refused a request. `reason` is the source's error reason, when the source raised it."""
 
@@ -421,7 +445,7 @@ class Watcher:
         self._stop_reason: str | None = None
         self._emitting_since: float | None = None
         self._stuck = False
-        self._wakeup = threading.Event()
+        self._wakeup = _Wakeup()
         self._acks: dict[str, int] = {}
         self._tracks = [_Track(settings.target, changelog, writer, self.timers)]
         self._tracks += [_Track(m.target, m.changelog, m.writer, list(m.timers)) for m in more]
@@ -430,6 +454,8 @@ class Watcher:
             raise ValueError(f"a watcher watches each target once, got {', '.join(keys)}")
 
     def request_stop(self, reason: str = "stopped") -> None:
+        """End the watch with `watch_ended` for `reason`. The signal handler calls this, so it must not take a lock
+        that the interrupted main thread may hold, nor write anywhere."""
         self._stop_reason = reason
         self.backend.begin_shutdown()
         self._wakeup.set()

@@ -7,6 +7,8 @@ import io
 import json
 import os
 import signal
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -485,6 +487,19 @@ def test_a_stop_signal_lets_a_healthy_write_finish(tmp_path: Path) -> None:
     threading.Timer(0.2, os.kill, (os.getpid(), signal.SIGTERM)).start()
     assert watcher.run() == 0
     assert sink.kinds == ["watch_started", "watch_ended"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="raises SIGTERM in a child process")
+def test_a_stop_signal_that_arrives_while_the_first_one_is_handled_still_ends_the_watch(tmp_path: Path) -> None:
+    script = Path(__file__).with_name("signal_burst_watcher.py")
+    # The child ends itself after 20 s when its handler deadlocks, so the timeout here is never the one that fires.
+    result = subprocess.run(
+        [sys.executable, str(script), str(tmp_path), "20"], capture_output=True, text=True, timeout=60, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert int(result.stderr.split()[-1]) >= 5, "the burst never reached the handler"
+    (ended,) = [json.loads(line) for line in result.stdout.splitlines()]
+    assert ended["kind"] == "watch_ended" and ended["data"]["reason"] == "signal SIGTERM"
 
 
 def test_handlers_not_set_from_python_are_put_back_as_the_default(
