@@ -694,12 +694,21 @@ class Engine:
             if refund:
                 account.budget.charge(refund, self.clock())
         now = self.clock()
-        limits = [o.error.retry_after for o in outcomes.values() if isinstance(o.error, RateLimited)] + ctx.rate_limits
-        if limits:
-            known = [r for r in limits if r is not None]
-            account.budget.on_rate_limited(max(known) if known else None, now)
-        elif any(o.error is None for o in outcomes.values()):
-            account.budget.on_success()
+        outcomes = self._check_rate_limits(account, outcomes)
+        limits: dict[str | None, list[float | None]] = {}
+        if ctx.rate_limits:
+            limits[None] = list(ctx.rate_limits)
+        for name, retry_after in ctx.dimension_rate_limits:
+            limits.setdefault(name, []).append(retry_after)
+        for o in outcomes.values():
+            if isinstance(o.error, RateLimited):
+                limits.setdefault(o.error.dimension, []).append(o.error.retry_after)
+        for dimension, retry_afters in limits.items():
+            known = [r for r in retry_afters if r is not None]
+            account.budget.on_rate_limited(max(known) if known else None, now, dimension)
+        if None not in limits and any(o.error is None for o in outcomes.values()):
+            # A 429 of one dimension does not count against the poll's other dimensions.
+            account.budget.on_success(d for d in ctx.estimate if d not in limits)
         windows = account.budget.windows()
         if windows != account.windows:
             previous, account.windows = account.windows, windows
@@ -720,6 +729,24 @@ class Engine:
                 log.exception("handling the poll of %s failed", res.rid)
                 self._fail(res, f"{type(exc).__name__}: {exc}", now)
         self._kick()
+
+    def _check_rate_limits(
+        self, account: Account, outcomes: Mapping[str, PollOutcome[Any]]
+    ) -> Mapping[str, PollOutcome[Any]]:
+        """Turn a :class:`RateLimited` that names an unknown dimension into a 429 of the whole account, reported to
+        the watchers as an error of the source, so the typo shows instead of blocking a dimension nothing uses."""
+        checked: dict[str, PollOutcome[Any]] = {}
+        for key, outcome in outcomes.items():
+            error = outcome.error
+            if isinstance(error, RateLimited) and error.dimension is not None:
+                try:
+                    account.budget.check_dimension(error.dimension)
+                except ValueError as exc:
+                    log.error("%s: %s", key, exc)
+                    message = f"{exc}; the whole account is blocked instead: {error}"
+                    outcome = PollOutcome(error=RateLimited(message, error.retry_after))
+            checked[key] = outcome
+        return checked
 
     def _fail(self, res: Resource, message: str, now: float) -> None:
         """Report an error of the source's code for `res` as `watch_degraded` and try again after a backoff."""
@@ -746,7 +773,8 @@ class Engine:
                 self._degrade(res, error.reason, str(error) or type(error).__name__)
                 delay = self._error_delay(res)
                 if isinstance(error, RateLimited):
-                    delay = max(delay, self.account(res.account).budget.blocked_until - now)
+                    dimensions = () if error.dimension is None else (error.dimension,)
+                    delay = max(delay, self.account(res.account).budget.blocked_for(dimensions, now))
         else:
             res.failures = 0
             res.degraded = None

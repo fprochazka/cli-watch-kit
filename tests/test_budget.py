@@ -92,3 +92,42 @@ def test_an_undeclared_dimension_gets_the_default_spec() -> None:
     budget = Budget({})
     budget.charge({"points": 3}, NOW)
     assert budget.dimension("points").spec == DimensionSpec()
+
+
+def test_a_429_of_one_dimension_blocks_only_the_polls_that_spend_on_it() -> None:
+    budget = Budget({"history": DimensionSpec(per_minute=50), "replies": DimensionSpec(per_minute=50)})
+    budget.on_rate_limited(30, NOW, "replies")
+    assert budget.blocked_until == 0.0
+    assert not budget.can_spend({"replies": 1}, NOW + 29)
+    assert budget.wait_time({"replies": 1}, NOW + 29) >= 1.0
+    assert budget.can_spend({"history": 1}, NOW + 1)
+    assert budget.can_spend({"replies": 1}, NOW + 31)
+    assert budget.describe(NOW)["dimensions"]["replies"]["blocked_for_s"] == 30
+
+
+def test_each_dimension_backs_off_on_its_own_and_a_success_resets_only_what_the_poll_spent_on() -> None:
+    budget = Budget({"history": DimensionSpec(), "replies": DimensionSpec()})
+    budget.on_rate_limited(None, NOW, "replies")
+    budget.on_rate_limited(None, NOW + 6, "replies")
+    assert budget.dimension("replies").blocked_until == NOW + 6 + 10
+    assert budget.dimension("history").backoff == 5 and budget.backoff == 5
+    budget.on_success(["history"])
+    assert budget.dimension("replies").backoff == 20
+    budget.on_success(["replies"])
+    assert budget.dimension("replies").backoff == 5
+
+
+def test_a_429_without_a_dimension_still_blocks_every_dimension() -> None:
+    budget = Budget({"history": DimensionSpec(), "replies": DimensionSpec()})
+    budget.on_rate_limited(30, NOW)
+    assert not budget.can_spend({"history": 0.1}, NOW + 29)
+    assert not budget.can_spend({"replies": 0.1}, NOW + 29)
+
+
+def test_a_429_of_an_unknown_dimension_is_refused() -> None:
+    budget = Budget({"history": DimensionSpec()})
+    with pytest.raises(ValueError, match="unknown budget dimension 'replys' \\(known: history\\)"):
+        budget.on_rate_limited(30, NOW, "replys")
+    budget.charge({"points": 1}, NOW)
+    budget.on_rate_limited(30, NOW, "points")
+    assert not budget.can_spend({"points": 0.1}, NOW + 1)

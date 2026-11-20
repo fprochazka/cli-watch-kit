@@ -7,10 +7,11 @@ from collections.abc import Mapping, Sequence
 
 import pytest
 
+from cli_watch_kit.budget import DimensionSpec
 from cli_watch_kit.daemon.engine import Engine
-from cli_watch_kit.source import PollContext, PollItem, PollOutcome, Target
+from cli_watch_kit.source import PollContext, PollItem, PollOutcome, RateLimited, Target
 from conftest import Clock
-from fakeapp.source import FakeSource, Snapshot, World
+from fakeapp.source import Call, FakeSource, Snapshot, World
 
 KINDS = frozenset({"status_changed", "note_added"})
 
@@ -179,6 +180,126 @@ def test_a_rate_limit_blocks_the_whole_account(clock: Clock) -> None:
         engine.poll("client", {})
         await engine.poll_due_once()
         assert sorted(k for call in source.calls[1:] for k in call.keys) == ["item a", "item b"]
+
+    asyncio.run(scenario())
+
+
+class PerMethodSource(FakeSource):
+    """An API that limits each of its methods on its own, like Slack: a dimension per method, which an item names in
+    `method`. `limited` maps an item id to the Retry-After of the 429 its next poll gets, `dimension` to the dimension
+    that 429 names (default: the item's method)."""
+
+    dimensions = {"history": DimensionSpec(per_minute=600), "replies": DimensionSpec(per_minute=600)}
+
+    def __init__(self, world: World) -> None:
+        super().__init__(world)
+        self.limited: dict[str, float] = {}
+        self.dimension: str | None = None
+        self.side_request: tuple[float, str] | None = None
+
+    def cost(self, batch: Sequence[PollItem[Snapshot]]) -> Mapping[str, float]:
+        return {str(batch[0].target.data["method"]): 1.0}
+
+    async def poll(self, batch: Sequence[PollItem[Snapshot]], ctx: PollContext) -> Mapping[str, PollOutcome[Snapshot]]:
+        target = batch[0].target
+        if target.id in self.limited:
+            self.calls.append(Call([target.key], ctx.account, dict(ctx.params)))
+            method = self.dimension or str(target.data["method"])
+            raise RateLimited("slow down", self.limited.pop(target.id), dimension=method)
+        if self.side_request is not None:
+            ctx.rate_limited(*self.side_request)
+        return await super().poll(batch, ctx)
+
+
+def method_item(ident: str, method: str) -> Target:
+    return Target("item", ident, {"interval": 10.0, "method": method})
+
+
+def polled(source: FakeSource, since: int = 0) -> list[str]:
+    return sorted(k for call in source.calls[since:] for k in call.keys)
+
+
+def test_a_rate_limit_of_one_dimension_blocks_only_the_targets_that_spend_on_it(clock: Clock) -> None:
+    source = PerMethodSource(world_of("a", "b", "c"))
+    source.limited = {"b": 60.0}
+    engine = Engine(source, clock=clock)
+
+    async def scenario() -> None:
+        await engine.subscribe("client", method_item("a", "history"), KINDS)
+        await engine.subscribe("client", method_item("b", "replies"), KINDS)
+        await engine.subscribe("client", method_item("c", "replies"), KINDS)
+        await engine.poll_due_once()
+        assert polled(source) == ["item a", "item b", "item c"]
+        budget = engine.accounts[""].budget
+        assert budget.blocked_until == 0.0
+        assert budget.dimension("replies").blocked_until == pytest.approx(clock() + 60)
+        clock.advance(10)
+        engine.poll("client", {})
+        await engine.poll_due_once()
+        # history goes on; c spends on replies, so it waits for the block although it is due.
+        assert polled(source, 3) == ["item a"]
+        clock.advance(51)
+        engine.poll("client", {})
+        await engine.poll_due_once()
+        assert "item b" in polled(source, 4) and "item c" in polled(source, 4)
+        assert engine.resources["item b"].degraded is None
+
+    asyncio.run(scenario())
+
+
+def test_a_429_the_poll_handled_itself_can_name_its_dimension(clock: Clock) -> None:
+    source = PerMethodSource(world_of("a", "b"))
+    source.side_request = (30.0, "replies")
+    engine = Engine(source, clock=clock)
+
+    async def scenario() -> None:
+        await engine.subscribe("client", method_item("a", "history"), KINDS)
+        await engine.poll_due_once()
+        budget = engine.accounts[""].budget
+        assert budget.blocked_until == 0.0
+        assert budget.dimension("replies").blocked_until == pytest.approx(clock() + 30)
+        # The poll spent on history, which the 429 did not name: its backoff stays at the start.
+        assert budget.dimension("replies").backoff == 10 and budget.dimension("history").backoff == 5
+        await engine.subscribe("client", method_item("b", "replies"), KINDS)
+        clock.advance(10)
+        engine.poll("client", {})
+        await engine.poll_due_once()
+        assert polled(source, 1) == ["item a"]
+
+    asyncio.run(scenario())
+
+
+def test_a_429_that_names_an_unknown_dimension_blocks_the_account_and_says_so(clock: Clock) -> None:
+    source = PerMethodSource(world_of("a", "b"))
+    source.limited = {"b": 60.0}
+    source.dimension = "replys"
+    engine = Engine(source, clock=clock)
+
+    async def scenario() -> None:
+        sub = await engine.subscribe("client", method_item("b", "replies"), KINDS)
+        await engine.poll_due_once()
+        events = engine.poll("client", {sub["subscription_id"]: 0})["events"][sub["subscription_id"]]
+        assert [e["data"]["reason"] for e in events] == ["rate_limited"]
+        assert "unknown budget dimension 'replys'" in events[0]["data"]["message"]
+        assert engine.accounts[""].budget.blocked_until == pytest.approx(clock() + 60)
+        await engine.subscribe("client", method_item("a", "history"), KINDS)
+        await engine.poll_due_once()
+        assert polled(source) == ["item b"]
+
+    asyncio.run(scenario())
+
+
+def test_a_side_request_429_that_names_an_unknown_dimension_fails_the_poll(clock: Clock) -> None:
+    source = PerMethodSource(world_of("a"))
+    source.side_request = (30.0, "replys")
+    engine = Engine(source, clock=clock)
+
+    async def scenario() -> None:
+        sub = await engine.subscribe("client", method_item("a", "history"), KINDS)
+        await engine.poll_due_once()
+        events = engine.poll("client", {sub["subscription_id"]: 0})["events"][sub["subscription_id"]]
+        assert [e["data"]["reason"] for e in events] == ["error"]
+        assert "ValueError: a 429 names the unknown budget dimension 'replys'" in events[0]["data"]["message"]
 
     asyncio.run(scenario())
 

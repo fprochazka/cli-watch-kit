@@ -50,13 +50,19 @@ class Unauthorized(SourceError):
 
 
 class RateLimited(SourceError):
-    """The API refused the request for its rate limit. Blocks the whole account for `retry_after` seconds or more."""
+    """The API refused the request for its rate limit. Blocks the whole account for `retry_after` seconds or more.
+
+    For an API that limits each endpoint on its own, name the budget dimension of the endpoint that answered 429 in
+    `dimension`: then only that dimension is blocked, and the account's polls whose cost does not use it go on. It
+    must be one of :attr:`Source.dimensions` (or one a cost already used); the engine reports any other name as an
+    error of the source and blocks the whole account."""
 
     reason = "rate_limited"
 
-    def __init__(self, message: str, retry_after: float | None = None) -> None:
+    def __init__(self, message: str, retry_after: float | None = None, dimension: str | None = None) -> None:
         super().__init__(message)
         self.retry_after = retry_after
+        self.dimension = dimension
 
 
 class Transient(SourceError):
@@ -173,7 +179,10 @@ class PollContext:
     spent: dict[str, float] = field(default_factory=dict)
     """What :meth:`spend` charged so far."""
     rate_limits: list[float | None] = field(default_factory=list)
-    """The `Retry-After` of each 429 :meth:`rate_limited` reported so far, `None` where the API sent none."""
+    """The `Retry-After` of each 429 for the whole account :meth:`rate_limited` reported so far, `None` where the API
+    sent none."""
+    dimension_rate_limits: list[tuple[str, float | None]] = field(default_factory=list)
+    """The dimension and the `Retry-After` of each 429 :meth:`rate_limited` reported for one dimension so far."""
 
     def spend(self, cost: Mapping[str, float]) -> None:
         """Charge what a request really cost. The estimate of each dimension spent on is refunded after the poll."""
@@ -181,11 +190,16 @@ class PollContext:
         for dim, amount in cost.items():
             self.spent[dim] = self.spent.get(dim, 0.0) + amount
 
-    def rate_limited(self, retry_after: float | None) -> None:
+    def rate_limited(self, retry_after: float | None, dimension: str | None = None) -> None:
         """Report a 429 that the poll handled itself, such as a side request it tries again later. The engine then
-        blocks the account for `retry_after` as it does for a poll that failed with :class:`RateLimited`, and does not
-        count the poll as a success. Reporting the 429 of such a failed poll as well changes nothing."""
-        self.rate_limits.append(retry_after)
+        blocks the account (or only `dimension`, see :class:`RateLimited`) for `retry_after` as it does for a poll
+        that failed with :class:`RateLimited`, and does not count the poll as a success. Reporting the 429 of such a
+        failed poll as well changes nothing. An unknown `dimension` raises `ValueError` at once."""
+        if dimension is None:
+            self.rate_limits.append(retry_after)
+            return
+        self.budget.check_dimension(dimension)
+        self.dimension_rate_limits.append((dimension, retry_after))
 
     @staticmethod
     def current() -> PollContext | None:
