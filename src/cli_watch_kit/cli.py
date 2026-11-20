@@ -30,7 +30,7 @@ import click
 from cli_watch_kit.app import WatchApp
 from cli_watch_kit.changelog import Changelog
 from cli_watch_kit.claude import MESSAGE_PRIORITIES, STREAM_MODES, StreamError, find_session, open_stream
-from cli_watch_kit.client import Backend, Watcher, WatchSettings, Writer, WriterContext, default_backend
+from cli_watch_kit.client import Backend, WatchedTarget, Watcher, WatchSettings, Writer, WriterContext, default_backend
 from cli_watch_kit.daemon.lifecycle import daemon_running, stop_daemon
 from cli_watch_kit.daemon.transport import DaemonFiles, DaemonTimeout, DaemonUnavailable, request
 from cli_watch_kit.durations import format_duration, parse_duration
@@ -152,14 +152,14 @@ def default_resource_dir(base: Path, target: Target) -> Path:
 
 def run_watch(
     app: WatchApp,
-    target: Target,
+    target: Target | Sequence[Target],
     options: WatchOptions,
     *,
     params: Mapping[str, Any] | None = None,
     source_options: Mapping[str, Any] | None = None,
     enabled_thresholds: Iterable[str] = (),
     also_subscribe: Iterable[str] = (),
-    timers: Sequence[ClientTimer] = (),
+    timers: Sequence[ClientTimer] | Callable[[Target], Sequence[ClientTimer]] = (),
     writer: Callable[[WriterContext], Writer] | None = None,
     resource_dir: Callable[[Path, Target], Path] = default_resource_dir,
     readme: str | None = None,
@@ -170,46 +170,66 @@ def run_watch(
 ) -> int:
     """Run one watch of `target` to its end and return the exit code: 0, 1 for an error, 2 for a usage error.
 
+    - `target` may be several targets of one kind, watched by one process into one event stream: each event names its
+      resource, each target has its own resource dir, and the watch ends when every target ended, or for all of them
+      on `--until` (the first such event of any target), `--timeout` or `--idle-after` (nothing from any target for
+      that long). It exits with 1 when any target ended with an error. A target given twice is watched once.
     - `params` go with the subscription to the daemon (an API key, for example), and so do `source_options`, which
       the source checks with `Source.check_options` and gets in `PollItem.options` (glab's `--logs` mode).
-    - `enabled_thresholds` are the threshold kinds whose option was given; `timers` compute them. `also_subscribe`
-      names kinds the daemon should track although the watcher does not report them, because a timer reads what
-      they put into the snapshot (glab's `quiet` reads the head pipeline's status).
-    - `writer` makes the app's writer of the resource dir from a :class:`WriterContext`.
+    - `enabled_thresholds` are the threshold kinds whose option was given; `timers` compute them. A watch of several
+      targets needs timers per target: pass a function that makes them for a target. `also_subscribe` names kinds the
+      daemon should track although the watcher does not report them, because a timer reads what they put into the
+      snapshot (glab's `quiet` reads the head pipeline's status).
+    - `writer` makes the app's writer of a resource dir from a :class:`WriterContext`, once per target.
     - Only one watcher at a time writes a resource dir. A second watcher of the same target into the same base dir
       exits with 1 and says so; give it its own `--base-dir` to run both.
-    - `sender_name` is what Claude Code shows as the sender (default: `<command> <target key>`), `restart` the
-      command line that watches the same target again (default: `<command> <kind> <id>`), `header` extra header lines.
+    - `sender_name` is what Claude Code shows as the sender, `restart` the command line that watches the same targets
+      again (both default to `<command> <kind> <id> [<id> ...]`), `header` extra header lines.
     """
     status = status or StatusOutput(app.status_prefix)
+    targets = list(dict.fromkeys([target] if isinstance(target, Target) else target))
+    if not targets:
+        raise ValueError("run_watch needs at least one target")
+    first = targets[0]
+    if not callable(timers) and timers and len(targets) > 1:
+        raise ValueError("a watch of several targets needs timers per target: pass a function that makes them")
+
+    def timers_of(t: Target) -> Sequence[ClientTimer]:
+        return timers(t) if callable(timers) else timers
+
     source = app.make_source()
     catalog = source.catalog
     try:
-        selected = catalog.resolve(target.kind, options.events, options.exclude_events, enabled_thresholds)
-        if options.until is not None and options.until not in catalog.produced(target.kind):
-            raise _Usage(f"--until: a {target.kind} watch never produces {options.until!r}")
+        kinds = sorted({t.kind for t in targets})
+        if len(kinds) > 1:
+            raise _Usage(f"one watch watches targets of one kind, not of {', '.join(kinds)}")
+        selected = catalog.resolve(first.kind, options.events, options.exclude_events, enabled_thresholds)
+        if options.until is not None and options.until not in catalog.produced(first.kind):
+            raise _Usage(f"--until: a {first.kind} watch never produces {options.until!r}")
         if options.until is not None and options.until not in selected:
             raise _Usage(f"--until={options.until} is filtered out by --events/--exclude-events")
         extra = frozenset(also_subscribe)
-        if extra - set(catalog.produced(target.kind)):
-            unknown = ", ".join(sorted(extra - set(catalog.produced(target.kind))))
-            raise _Usage(f"a {target.kind} watch never produces {unknown}, so it cannot also subscribe to it")
+        if extra - set(catalog.produced(first.kind)):
+            unknown = ", ".join(sorted(extra - set(catalog.produced(first.kind))))
+            raise _Usage(f"a {first.kind} watch never produces {unknown}, so it cannot also subscribe to it")
         timeout = _duration("--timeout", options.timeout)
         idle_after = _duration("--idle-after", options.idle_after)
         # The files go to the session's scratchpad whatever the stream, so the agent finds them next to its others.
         session = find_session()
         scratchpad = getattr(session, "scratchpad_dir", None) if session is not None else None
         base = app.paths.base_dir(options.base_dir, scratchpad)
-        changelog = Changelog(resource_dir(base, target), target.key, readme)
+        changelogs = [Changelog(resource_dir(base, t), t.key, readme) for t in targets]
+        command_line = f"{app.command} {first.kind} {' '.join(t.id for t in targets)}"
         stream = open_stream(
             app,
             options.events_stream,
             session=session,
-            resource=target.key,
-            sender_name=sender_name or f"{app.command} {target.key}",
-            changelog=changelog.events_path,
+            resource=first.key,
+            sender_name=sender_name or command_line,
+            changelog=changelogs[0].events_path,
             priority=options.message_priority,
             status=status,
+            more={t.key: c.events_path for t, c in zip(targets[1:], changelogs[1:], strict=True)},
         )
     except (FilterError, StreamError, _Usage) as exc:
         status.line(f"error: {exc}")
@@ -217,29 +237,32 @@ def run_watch(
     # One watcher per resource dir: two would interleave their seq numbers in one events.jsonl and overwrite each
     # other's baseline. The OS releases the lock when the watcher dies. A watcher that was just stopped, so that this
     # one can replace it, may still be finishing, so wait for it a moment before refusing.
-    changelog.dir.mkdir(parents=True, exist_ok=True)
-    dir_lock = FileLock(changelog.dir / DIR_LOCK)
+    dir_locks: list[FileLock] = []
     try:
-        dir_lock.acquire(DIR_LOCK_WAIT)
-    except LockTimeout:
-        status.line(
-            f"error: another watcher already watches {target.key} into {changelog.dir}; stop that one first, or give"
-            " this one its own --base-dir"
-        )
-        return 1
-    try:
+        for t, changelog in zip(targets, changelogs, strict=True):
+            changelog.dir.mkdir(parents=True, exist_ok=True)
+            dir_lock = FileLock(changelog.dir / DIR_LOCK)
+            try:
+                dir_lock.acquire(DIR_LOCK_WAIT)
+            except LockTimeout:
+                status.line(
+                    f"error: another watcher already watches {t.key} into {changelog.dir}; stop that one first, or"
+                    " give this one its own --base-dir"
+                )
+                return 1
+            dir_locks.append(dir_lock)
         try:
             backend = default_backend(app, options.no_daemon)
         except (DaemonUnavailable, TimeoutError) as exc:
             status.line(f"error: cannot start the daemon: {exc}; retry with --no-daemon to poll without it")
             return 1
-        thresholds = [d for t in timers if (d := t.describe())]
+        thresholds = [d for t in timers_of(first) if (d := t.describe())]
         print_header(
             status,
             app,
-            target,
+            first,
             stream.sink,
-            changelog,
+            changelogs[0],
             selected,
             backend,
             until=options.until,
@@ -247,11 +270,12 @@ def run_watch(
             idle_after=idle_after,
             fallback=stream.fallback,
             thresholds=thresholds,
-            restart=restart or f"{app.command} {target.kind} {target.id}",
+            restart=restart or command_line,
             extra=header,
+            more=list(zip(targets[1:], changelogs[1:], strict=True)),
         )
         settings = WatchSettings(
-            target,
+            first,
             selected,
             until=options.until,
             timeout=timeout,
@@ -261,21 +285,30 @@ def run_watch(
             threshold_kinds=frozenset(catalog.thresholds),
             subscribed=catalog.daemon_kinds(selected) | catalog.daemon_kinds(extra),
         )
+
+        def writer_of(t: Target, changelog: Changelog) -> Writer | None:
+            return writer(WriterContext(base, changelog.dir, t, backend, status)) if writer is not None else None
+
         watcher = Watcher(
             settings,
             backend,
             stream.sink,
-            changelog,
+            changelogs[0],
             status,
-            writer=writer(WriterContext(base, changelog.dir, target, backend, status)) if writer is not None else None,
-            timers=timers,
+            writer=writer_of(first, changelogs[0]),
+            timers=timers_of(first),
+            more=[
+                WatchedTarget(t, c, writer_of(t, c), timers_of(t))
+                for t, c in zip(targets[1:], changelogs[1:], strict=True)
+            ],
         )
         try:
             return watcher.run()
         finally:
             backend.close()
     finally:
-        dir_lock.release()
+        for dir_lock in dir_locks:
+            dir_lock.release()
 
 
 def print_header(
@@ -294,26 +327,38 @@ def print_header(
     thresholds: Sequence[str] = (),
     restart: str | None = None,
     extra: Sequence[str] = (),
+    more: Sequence[tuple[Target, Changelog]] = (),
 ) -> None:
-    """The startup header: what is watched, how events are delivered, and how to restart with other options."""
+    """The startup header: what is watched, how events are delivered, and how to restart with other options.
+
+    `more` are the other targets of a watch of several, with their changelogs: then each target gets its `resource:`,
+    `dir:` and `changelog:` lines, one after another, before the `stream:` line."""
     catalog = app.make_source().catalog
     # A threshold kind without its option is not tracked at all, rather than ignored.
     tracked = [k for k in catalog.produced(target.kind) if k not in catalog.thresholds or k in events]
     subscribed = [k for k in tracked if k in events]
     ignored = [k for k in tracked if k not in events]
-    status.line(f"resource: {target.key}")
+    if more:
+        for t, c in [(target, changelog), *more]:
+            status.line(f"resource: {t.key}")
+            status.line(f"dir: {c.dir}")
+            status.line(f"changelog: {c.events_path}")
+    else:
+        status.line(f"resource: {target.key}")
     status.line(f"stream: {sink.describe()}")
     if fallback:
         status.line(f"stream fallback: not messaging the Claude Code session: {fallback}")
-    status.line(f"dir: {changelog.dir}")
-    status.line(f"changelog: {changelog.events_path}")
+    if not more:
+        status.line(f"dir: {changelog.dir}")
+        status.line(f"changelog: {changelog.events_path}")
     for line in extra:
         status.line(line)
     status.line(f"events: {','.join(subscribed) or '(none)'} (always: {','.join(LIFECYCLE_KINDS)})")
     status.line(f"ignored: {','.join(ignored) or '(none)'}")
     if thresholds:
         status.line(f"thresholds: {'; '.join(thresholds)}")
-    ends = [f"on {until}"] if until else []
+    ends = ["when every resource ended"] if more else []
+    ends += [f"on {until}"] if until else []
     ends += [f"after {timeout}"] if timeout else []
     ends += [f"after {format_duration(idle_after)} without an event"] if idle_after else []
     if ends:

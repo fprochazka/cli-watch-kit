@@ -6,7 +6,8 @@ this process, with a private budget.
 
 The watcher numbers the events it reports itself (`seq`), strictly increasing across daemon restarts and across
 watcher runs on the same changelog. After a daemon restart it subscribes again with its baseline, so the new daemon
-reports only what changed, and it drops the new `watch_started` when the snapshot did not move.
+reports only what changed, and it drops the new `watch_started` when the snapshot did not move. One watcher can
+watch several targets: each keeps its own numbering, changelog and baseline, and they share one stream.
 """
 
 from __future__ import annotations
@@ -348,10 +349,47 @@ class WatchSettings:
         return self.events - self.threshold_kinds
 
 
+@dataclass(frozen=True)
+class WatchedTarget:
+    """One more target of a :class:`Watcher` that watches several: its changelog, and the app's writer and threshold
+    timers for it. It is watched with the same :class:`WatchSettings` as the first target, so it should be of the same
+    kind."""
+
+    target: Target
+    changelog: Changelog
+    writer: Writer | None = None
+    timers: Sequence[ClientTimer] = ()
+
+
+@dataclass
+class _Track:
+    """What the watcher keeps per target."""
+
+    target: Target
+    changelog: Changelog
+    writer: Writer | None
+    timers: list[ClientTimer]
+    subscription: str | None = None
+    cursor: int = 0
+    """The daemon's sequence number of the last event received. It restarts when the daemon restarts, so it is only
+    the poll cursor. Reported events carry the watcher's own `seq`, which never goes back."""
+    seq: int = 0
+    snapshot_hash: str | None = None
+    resubscribed: bool = False
+    ended: bool = False
+
+
 class Watcher:
     """One watch: subscribes, polls the backend, numbers and delivers the events, and ends.
 
-    It does not lock its resource dir. `run_watch` does, so that a second watcher of the same resource is refused;
+    With `more`, one watcher watches several targets in one stream: each event carries the key of its resource in
+    `resource`, each target keeps its own changelog, baseline and numbering, and all of them share the settings, the
+    sink, one subscription lease and one poll of the backend. A target that ends (`watch_ended` from the daemon) drops
+    out; the watch ends when every target ended, or for all of them at once on `until` (the first event of that kind
+    of any target), the timeout, `idle_after` (no event of any target for that long), a stop or a gone session. It
+    exits with 1 when any target ended for one of the `error_reasons`.
+
+    It does not lock its resource dirs. `run_watch` does, so that a second watcher of the same resource is refused;
     a CLI that builds Watcher objects itself must make sure no two of them share a changelog.
     """
 
@@ -367,6 +405,7 @@ class Watcher:
         timers: Sequence[ClientTimer] = (),
         clock: Callable[[], float] = time.monotonic,
         retry_delays: tuple[float, float] = (1.0, 60.0),
+        more: Sequence[WatchedTarget] = (),
     ) -> None:
         self.settings = settings
         self.backend = backend
@@ -383,13 +422,12 @@ class Watcher:
         self._emitting_since: float | None = None
         self._stuck = False
         self._wakeup = threading.Event()
-        self._subscription: str | None = None
-        # The daemon's sequence number of the last event received. It restarts when the daemon restarts, so it is
-        # only the poll cursor. Reported events carry the watcher's own `_seq`, which never goes back.
-        self._cursor = 0
         self._acks: dict[str, int] = {}
-        self._seq = 0
-        self._snapshot_hash: str | None = None
+        self._tracks = [_Track(settings.target, changelog, writer, self.timers)]
+        self._tracks += [_Track(m.target, m.changelog, m.writer, list(m.timers)) for m in more]
+        keys = [t.target.key for t in self._tracks]
+        if len(set(keys)) != len(keys):
+            raise ValueError(f"a watcher watches each target once, got {', '.join(keys)}")
 
     def request_stop(self, reason: str = "stopped") -> None:
         self._stop_reason = reason
@@ -422,24 +460,24 @@ class Watcher:
 
         return {sig: signal.signal(sig, handler) for sig in (signal.SIGTERM, signal.SIGINT)}
 
-    def _subscribe(self, resubscribe: bool) -> None:
+    def _subscribe(self, track: _Track, resubscribe: bool) -> None:
         baseline = None
         if resubscribe:
-            stored = self.changelog.load_baseline()
+            stored = track.changelog.load_baseline()
             baseline = stored.snapshot if stored else None
         s = self.settings
-        self._subscription, self._cursor = self.backend.subscribe(
-            self.client_id, s.target, s.subscribed_events, baseline, s.params, s.source_options
+        track.subscription, track.cursor = self.backend.subscribe(
+            self.client_id, track.target, s.subscribed_events, baseline, s.params, s.source_options
         )
 
-    def _resubscribe(self, deadline: float | None) -> bool:
+    def _resubscribe(self, track: _Track, deadline: float | None) -> bool:
         """Subscribe again with the baseline, retrying with a backoff while the trouble may pass (a daemon that is
         just restarting, an API that is unreachable after a suspend). Return whether it worked; on a stop or the
         deadline it gives up and the loop ends the watch."""
         delay, longest = self.retry_delays
         while True:
             try:
-                self._subscribe(resubscribe=True)
+                self._subscribe(track, resubscribe=True)
                 return True
             except BackendError as exc:
                 if exc.reason not in RETRYABLE_REASONS:
@@ -451,7 +489,8 @@ class Watcher:
                 error = exc
                 if isinstance(exc, DaemonTimeout):
                     # The daemon may have created the subscription after all. A new client id lets that one expire
-                    # with its lease, instead of being renewed by this watcher's polls for nothing.
+                    # with its lease, instead of being renewed by this watcher's polls for nothing. The subscriptions
+                    # of the other targets then come back as unknown, and they subscribe again too.
                     self.client_id = uuid.uuid4().hex
             if deadline is not None and self.clock() + delay >= deadline:
                 self.request_stop("timeout")
@@ -462,18 +501,18 @@ class Watcher:
                 return False
             delay = min(delay * 2, longest)
 
-    def _next_seq(self) -> int:
-        self._seq += 1
-        return self._seq
+    def _label(self, track: _Track) -> str:
+        """What a status line about one target starts with: nothing when the watch has only that one."""
+        return f"{track.target.key}: " if len(self._tracks) > 1 else ""
 
-    def _end_event(self, reason: str, **data: Any) -> Event:
-        key = self.settings.target.key
-        return Event(WATCH_ENDED, key, self._next_seq(), utc_now_iso(), {"reason": reason, **data})
+    def _end_event(self, track: _Track, reason: str, **data: Any) -> Event:
+        track.seq += 1
+        return Event(WATCH_ENDED, track.target.key, track.seq, utc_now_iso(), {"reason": reason, **data})
 
-    def _deliver(self, events: list[Event]) -> None:
+    def _deliver(self, track: _Track, events: list[Event]) -> None:
         if not events:
             return
-        self.changelog.append(events)
+        track.changelog.append(events)
         self._to_sink(lambda: self.sink.emit(events))
 
     def _to_sink(self, write: Callable[[], None]) -> None:
@@ -501,107 +540,151 @@ class Watcher:
             os.dup2(devnull, sys.stdout.fileno())
             os.close(devnull)
 
-    def _finish(self, event: Event) -> None:
-        self._deliver([event])
-        self.status.line(f"ended: {event.data.get('reason')}")
+    def _finish(self, reason: str, **data: Any) -> None:
+        """End every target still watched with `watch_ended` for `reason`."""
+        for track in self._tracks:
+            if not track.ended:
+                track.ended = True
+                self._deliver(track, [self._end_event(track, reason, **data)])
+        self.status.line(f"ended: {reason}")
+
+    def _exit_code(self, failed: bool) -> int:
+        return EXIT_ERROR if failed else EXIT_OK
+
+    def _receive(self, track: _Track, response: Mapping[str, Any], idle: IdleTimer) -> list[Event]:
+        """The events of one target in a poll's answer, filtered, attached and numbered; its snapshot taken in."""
+        s = self.settings
+        sid = track.subscription
+        previous_hash = track.snapshot_hash
+        snapshot = (response.get("snapshots") or {}).get(sid)
+        if snapshot:
+            track.snapshot_hash = str(snapshot["hash"])
+            track.changelog.save_baseline(track.snapshot_hash, snapshot.get("data"))
+            if track.writer is not None:
+                track.writer.snapshot(snapshot.get("data"))
+            for timer in track.timers:
+                timer.snapshot(snapshot.get("data"), self.clock())
+        raw = [Event.from_json(e) for e in (response.get("events") or {}).get(sid) or []]
+        for event in raw:
+            track.cursor = max(track.cursor, event.seq)
+        events = [e for e in raw if e.kind in s.events]
+        if track.resubscribed and any(e.kind == WATCH_STARTED for e in events):
+            # After a daemon restart, the new watch_started repeats what we already know unless the snapshot
+            # moved; changes in between arrive as normal events, diffed against our stored snapshot.
+            events = [
+                e for e in events if not (e.kind == WATCH_STARTED and e.data.get("snapshot_hash") == previous_hash)
+            ]
+            track.resubscribed = False
+        if track.writer is not None:
+            events = track.writer.attach(events)
+        now = self.clock()
+        for timer in track.timers:
+            timer.reported(events, now)
+            events += [Event(kind, track.target.key, 0, utc_now_iso(), dict(data)) for kind, data in timer.due(now)]
+        idle.reported(events, now)
+        numbered = []
+        for event in events:
+            track.seq += 1
+            numbered.append(replace(event, seq=track.seq))
+        return numbered
+
+    def _drop(self, track: _Track) -> None:
+        """Unsubscribe a target that ended while others are still watched."""
+        sid, track.subscription = track.subscription, None
+        if sid is not None:
+            with contextlib.suppress(BackendError, DaemonUnavailable, OSError, TimeoutError):
+                self.backend.unsubscribe(self.client_id, sid)
 
     def run(self) -> int:
         previous_handlers = self._install_signal_handlers()
         s = self.settings
         deadline = self.clock() + s.timeout if s.timeout is not None else None
-        stored = self.changelog.load_baseline()
-        self._snapshot_hash = stored.snapshot_hash if stored else None
-        # Continue the changelog's numbering, so events.jsonl stays strictly increasing across watcher runs too.
-        self._seq = self.changelog.last_seq()
-        resubscribed = False
+        for track in self._tracks:
+            stored = track.changelog.load_baseline()
+            track.snapshot_hash = stored.snapshot_hash if stored else None
+            # Continue the changelog's numbering, so events.jsonl stays strictly increasing across watcher runs too.
+            track.seq = track.changelog.last_seq()
         idle = IdleTimer(s.idle_after, s.threshold_kinds, self.clock())
+        failed = False
         try:
-            self._subscribe(resubscribe=False)
+            for track in self._tracks:
+                self._subscribe(track, resubscribe=False)
             while True:
                 if self._stop_reason is not None:
-                    self._finish(self._end_event(self._stop_reason))
-                    return EXIT_OK
-                assert self._subscription is not None
+                    self._finish(self._stop_reason)
+                    return self._exit_code(failed)
+                active = [t for t in self._tracks if not t.ended]
                 self._to_sink(self.sink.tick)
+                cursors = {t.subscription: t.cursor for t in active if t.subscription is not None}
                 try:
-                    response = self.backend.poll(self.client_id, {self._subscription: self._cursor}, self._acks)
+                    response = self.backend.poll(self.client_id, cursors, self._acks)
                 except DaemonTimeout as exc:
                     # A busy daemon: polling is safe to repeat, so ask again rather than give up the watch.
                     if deadline is not None and self.clock() >= deadline:
-                        self._finish(self._end_event("timeout"))
-                        return EXIT_OK
+                        self._finish("timeout")
+                        return self._exit_code(failed)
                     self.status.line(f"{exc}; polling again ({HUNG_AFTER} in a row and the daemon is replaced)")
                     self._wakeup.wait(1.0)
                     continue
                 self._acks = {k: int(v) for k, v in (response.get("acks") or {}).items()}
-                if self._subscription in response.get("unknown", []):
-                    self.status.line("daemon restarted, subscribing again")
-                    if self._resubscribe(deadline):
-                        resubscribed = True
-                    continue
-                previous_hash = self._snapshot_hash
-                snapshot = (response.get("snapshots") or {}).get(self._subscription)
-                if snapshot:
-                    self._snapshot_hash = str(snapshot["hash"])
-                    self.changelog.save_baseline(self._snapshot_hash, snapshot.get("data"))
-                    if self.writer is not None:
-                        self.writer.snapshot(snapshot.get("data"))
-                    for timer in self.timers:
-                        timer.snapshot(snapshot.get("data"), self.clock())
-                raw = [Event.from_json(e) for e in (response.get("events") or {}).get(self._subscription) or []]
-                for event in raw:
-                    self._cursor = max(self._cursor, event.seq)
-                events = [e for e in raw if e.kind in s.events]
-                if resubscribed and any(e.kind == WATCH_STARTED for e in events):
-                    # After a daemon restart, the new watch_started repeats what we already know unless the snapshot
-                    # moved; changes in between arrive as normal events, diffed against our stored snapshot.
-                    events = [
-                        e
-                        for e in events
-                        if not (e.kind == WATCH_STARTED and e.data.get("snapshot_hash") == previous_hash)
-                    ]
-                    resubscribed = False
-                if self.writer is not None:
-                    events = self.writer.attach(events)
-                now = self.clock()
-                for timer in self.timers:
-                    timer.reported(events, now)
-                    events += [Event(kind, s.target.key, 0, utc_now_iso(), dict(data)) for kind, data in timer.due(now)]
-                idle.reported(events, now)
-                events = [replace(e, seq=self._next_seq()) for e in events]
-                ended = next((e for e in events if e.kind == WATCH_ENDED), None)
-                hit = next((e for e in events if s.until and e.kind == s.until), None)
-                self._deliver(events)
-                if ended is not None:
-                    reason = str(ended.data.get("reason"))
-                    already = f" (already {reason} when the watch started)" if ended.data.get("already_ended") else ""
-                    self.status.line(f"ended: {reason}{already}")
-                    return EXIT_ERROR if reason in s.error_reasons else EXIT_OK
+                unknown = set(response.get("unknown", []))
+                restarted = [t for t in active if t.subscription in unknown]
+                hit: Event | None = None
+                for track in active:
+                    if track.subscription in unknown:
+                        continue
+                    events = self._receive(track, response, idle)
+                    ended = next((e for e in events if e.kind == WATCH_ENDED), None)
+                    if hit is None:
+                        hit = next((e for e in events if s.until and e.kind == s.until), None)
+                    self._deliver(track, events)
+                    if ended is not None:
+                        track.ended = True
+                        reason = str(ended.data.get("reason"))
+                        already = (
+                            f" (already {reason} when the watch started)" if ended.data.get("already_ended") else ""
+                        )
+                        self.status.line(f"ended: {self._label(track)}{reason}{already}")
+                        failed = failed or reason in s.error_reasons
+                        self._drop(track)
+                if all(t.ended for t in self._tracks):
+                    return self._exit_code(failed)
                 if hit is not None:
-                    self._finish(self._end_event("until", event=hit.kind, seq=hit.seq))
-                    return EXIT_OK
+                    data: dict[str, Any] = {"event": hit.kind, "seq": hit.seq}
+                    if len(self._tracks) > 1:
+                        data["resource"] = hit.resource
+                    self._finish("until", **data)
+                    return self._exit_code(failed)
+                if restarted:
+                    self.status.line("daemon restarted, subscribing again")
+                    for track in restarted:
+                        if not self._resubscribe(track, deadline):
+                            break
+                        track.resubscribed = True
+                    continue
                 if not self.sink.alive():
-                    self._finish(self._end_event("session_gone"))
-                    return EXIT_OK
+                    self._finish("session_gone")
+                    return self._exit_code(failed)
                 if deadline is not None and self.clock() >= deadline:
-                    self._finish(self._end_event("timeout"))
-                    return EXIT_OK
+                    self._finish("timeout")
+                    return self._exit_code(failed)
                 if idle.idle(self.clock()):
-                    self._finish(self._end_event("idle", idle_after=format_duration(s.idle_after or 0.0)))
-                    return EXIT_OK
+                    self._finish("idle", idle_after=format_duration(s.idle_after or 0.0))
+                    return self._exit_code(failed)
                 self._wakeup.wait(self._wait(response, deadline, idle))
         except (BackendError, DaemonMismatch, DaemonUnavailable, TimeoutError) as exc:
             if self._stop_reason is not None:
                 # Stopped while a request was in flight, and the daemon is gone: end like any other stop.
-                self._finish(self._end_event(self._stop_reason))
-                return EXIT_OK
+                self._finish(self._stop_reason)
+                return self._exit_code(failed)
             self.status.line(f"error: {exc}")
             return EXIT_ERROR
         finally:
             self.backend.begin_shutdown()
-            if self._subscription is not None:
-                with contextlib.suppress(BackendError, DaemonUnavailable, OSError, TimeoutError):
-                    self.backend.unsubscribe(self.client_id, self._subscription)
+            for track in self._tracks:
+                if track.subscription is not None:
+                    with contextlib.suppress(BackendError, DaemonUnavailable, OSError, TimeoutError):
+                        self.backend.unsubscribe(self.client_id, track.subscription)
             try:
                 if self._stuck:
                     self._abandon_stdout()
@@ -617,7 +700,7 @@ class Watcher:
         wait = int(response.get("next_poll_ms", 5000)) / 1000.0
         if deadline is not None:
             wait = max(0.0, min(wait, deadline - now))
-        candidates = [t.seconds_until_next(now) for t in self.timers]
+        candidates = [timer.seconds_until_next(now) for t in self._tracks if not t.ended for timer in t.timers]
         candidates += [idle.seconds_until_next(now), self.sink.seconds_until_flush()]
         for candidate in candidates:
             if candidate is not None:

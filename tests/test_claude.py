@@ -24,7 +24,7 @@ from cc_blackbox import MessageEventSink  # noqa: E402
 from cli_watch_kit.app import WatchApp  # noqa: E402
 from cli_watch_kit.claude import StreamError, claude_message_sink, message_envelope, open_stream  # noqa: E402
 from cli_watch_kit.events import Event  # noqa: E402
-from cli_watch_kit.sinks import StatusOutput, StdoutSink  # noqa: E402
+from cli_watch_kit.sinks import ResourceSinks, StatusOutput, StdoutSink  # noqa: E402
 from conftest import Clock  # noqa: E402
 from fakeapp.source import FakeSource  # noqa: E402
 
@@ -235,3 +235,33 @@ def test_stdout_sink_writes_one_line_per_event() -> None:
     out = StringIO()
     StdoutSink(out).emit([event("note_added", 1, notes=1)])
     assert json.loads(out.getvalue())["seq"] == 1
+
+
+def test_a_watch_of_several_targets_messages_each_resource_in_its_own_envelope(
+    receiver: Receiver, tmp_path: Path
+) -> None:
+    status = StatusOutput(APP.status_prefix)
+    stream = open_stream(
+        APP,
+        "claude-message",
+        session=fake_session(receiver.path),
+        resource="item a",
+        sender_name="demo watch item a b",
+        changelog=tmp_path / "a" / "events.jsonl",
+        priority="next",
+        status=status,
+        more={"item b": tmp_path / "b" / "events.jsonl"},
+    )
+    sink = stream.sink
+    assert isinstance(sink, ResourceSinks) and "'demo watch item a b'" in sink.describe()
+    first = Event("watch_ended", "item a", 3, "2026-11-09T10:00:00.000Z", {"reason": "done"})
+    second = Event("watch_ended", "item b", 7, "2026-11-09T10:00:00.000Z", {"reason": "done"})
+    sink.emit([first, second])
+    frames = wait_frames(receiver, 2)
+    contents = sorted(f["message"]["content"] for f in frames)
+    assert '<demo-watcher resource="item a" seq="3">' in contents[0]
+    assert '<demo-watcher resource="item b" seq="7">' in contents[1]
+    assert {f["from"] for f in frames} == {f"demo-watch:{os.getpid()}"}
+    resource_sinks = cast(Any, sink).sinks
+    assert resource_sinks["item a"].rate_limiter is resource_sinks["item b"].rate_limiter
+    sink.close()

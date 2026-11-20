@@ -90,6 +90,53 @@ class StdoutSink:
         pass
 
 
+class ResourceSinks:
+    """One stream made of a sink per resource, for a watch of several targets on a stream that frames each resource
+    on its own (a Claude Code message names one resource). Each event goes to the sink of its `resource`."""
+
+    def __init__(self, sinks: Mapping[str, Sink]) -> None:
+        if not sinks:
+            raise ValueError("ResourceSinks needs at least one sink")
+        self.sinks = dict(sinks)
+        first = next(iter(self.sinks.values()))
+        self.name = first.name
+        self._first = first
+
+    def describe(self) -> str:
+        return self._first.describe()
+
+    def emit(self, events: Sequence[Event]) -> None:
+        by_resource: dict[str, list[Event]] = {}
+        for event in events:
+            by_resource.setdefault(event.resource, []).append(event)
+        for resource, batch in by_resource.items():
+            sink = self.sinks.get(resource)
+            if sink is None:
+                raise ValueError(f"no sink for the resource {resource!r}")
+            sink.emit(batch)
+
+    def seconds_until_flush(self) -> float | None:
+        due = [d for sink in self.sinks.values() if (d := sink.seconds_until_flush()) is not None]
+        return min(due) if due else None
+
+    def tick(self) -> None:
+        for sink in self.sinks.values():
+            sink.tick()
+
+    def alive(self) -> bool:
+        return all(sink.alive() for sink in self.sinks.values())
+
+    def close(self) -> None:
+        errors: list[Exception] = []
+        for sink in self.sinks.values():
+            try:
+                sink.close()
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            raise errors[0]
+
+
 class StatusOutput:
     """Status lines with the app's prefix, on stderr unless a stream is given."""
 

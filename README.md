@@ -120,6 +120,17 @@ if __name__ == "__main__":
     main(APP)
 ```
 
+**Several targets in one watch.** `run_watch` takes a list of targets of one kind instead of one target (`my-cli watch issue ABC-1 ABC-2`), and watches them in one process with one event stream: each event names its target in `resource` (in a Claude Code message, the envelope does, one message per resource under one rate limit). Each target keeps its own resource dir, changelog, baseline and `seq` numbering, and the header prints `resource:`, `dir:` and `changelog:` for each. A target that ends drops out; the watch ends when all of them ended, or for all at once on `--until` (the first such event of any target), `--timeout`, `--idle-after` (nothing from any target for that long) or a stop. It exits with 1 when any target ended with an error, such as `not_found`. A target given twice is watched once. Timers are per target, so with several targets `timers` must be a function that makes them for a target. A CLI that uses `Watcher` directly passes the other targets as `more=[WatchedTarget(target, changelog, writer, timers), ...]`.
+
+```python
+@watch.command()
+@click.argument("issue_ids", nargs=-1, required=True)
+@watch_options
+def issue(issue_ids: tuple[str, ...], options: WatchOptions) -> None:
+    targets = [Target("issue", issue_id) for issue_id in issue_ids]
+    raise SystemExit(run_watch(APP, targets, options, params={"api_key": api_key()}))
+```
+
 `run_watch` also takes `enabled_thresholds` and `timers` (the app's `ClientTimer`s for threshold kinds), `also_subscribe` (kinds the daemon should track for a timer without the watcher reporting them), a `writer` factory for the app's own files in the resource dir (it gets a `WriterContext` with the base and resource dirs, the target, the backend for extra ops and the status output), `resource_dir`, `readme`, `sender_name`, `restart` and extra `header` lines. Only one watcher at a time writes a resource dir: a second watcher of the same target into the same base dir waits up to 5 s for the first one to finish, then exits with 1 and says so, and runs with its own `--base-dir`. Watchers of one target in different base dirs, such as two Claude Code sessions with their own scratchpads, always work: they share one resource of the daemon, and each gets every event into its own files and stream, also across a daemon restart or drain, one of them ending first, or one starting later. A CLI on another framework fills a `WatchOptions` itself, or uses `cli_watch_kit.client.Watcher` directly; that one takes no lock, so the CLI must keep two watchers of one resource out of the same dir itself.
 
 An app with requests the daemon should serve within the budget (fetching a log for a watcher, for example) puts them in `Source.ops`; a watcher calls them with `backend.call(op, payload, params)`. A source whose targets relay other targets (an MR and its head pipeline) returns them from `Source.children`.
@@ -141,7 +152,7 @@ An app with requests the daemon should serve within the budget (fetching a log f
 
 With the `claude-code` extra, `--events-stream=auto` (the default) sends the events into the Claude Code session that started the watcher, when that session accepts messages, as `<envelope_tag resource="issue ABC-123" seq="1-2">` blocks. cc-blackbox does the delivery: session lookup, the protocol check, burst batching, the 64 KB cap, the receiver's rate limit, and the end of the watch when the session is gone. The resource dir then lives in the session's scratchpad. Without the extra, `auto` uses stdout, and under Claude Code the header says which extra to install; `claude-message` fails with the same hint. Nothing imports cc-blackbox until a stream needs it.
 
-Only the message with `watch_started` names the resource dir and the changelog; its `watch_started` drops the summary's `dir`, and `WatchApp.announced` can rewrite it further (glab-watch makes its threads dir relative there). A message's sender id is `<WatchApp.sender>:<pid>` (default: the app's name), and its sender name is what `run_watch(sender_name=...)` says (default: `<command> <target key>`).
+Only the message with `watch_started` names the resource dir and the changelog; its `watch_started` drops the summary's `dir`, and `WatchApp.announced` can rewrite it further (glab-watch makes its threads dir relative there). A message's sender id is `<WatchApp.sender>:<pid>` (default: the app's name), and its sender name is what `run_watch(sender_name=...)` says (default: `<command> <kind> <id>`, with every id of a watch of several targets).
 
 ## Developing
 

@@ -7,9 +7,9 @@ messaging protocol is one it speaks, batches the events that arrive within 3 s i
 messaging stops working. Without the extra, `auto` falls back to stdout and says which extra to install.
 
 Each message is a `<{envelope_tag} resource="..." seq="...">` block for one resource, sent as `<sender>:<pid>` under a
-sender name the app chooses. Only the message with `watch_started` names the resource dir and the changelog.
-Delivery is best effort: the receiver may rate-limit a message, or hold it until its user approves it. The changelog
-always has every event.
+sender name the app chooses. A watch of several targets sends a message per resource, under one rate limit. Only the
+message with `watch_started` names the resource dir and the changelog. Delivery is best effort: the receiver may
+rate-limit a message, or hold it until its user approves it. The changelog always has every event.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from cli_watch_kit.events import WATCH_ENDED, WATCH_STARTED, Event
-from cli_watch_kit.sinks import Sink, StatusOutput, StdoutSink
+from cli_watch_kit.sinks import ResourceSinks, Sink, StatusOutput, StdoutSink
 
 if TYPE_CHECKING:
     from cc_blackbox import ActiveSession, EventEnvelope, RateLimitedSender
@@ -106,8 +106,12 @@ def open_stream(
     changelog: Path,
     priority: str,
     status: StatusOutput,
+    more: Mapping[str, Path] | None = None,
 ) -> Stream:
-    """The sink for `mode`. `session` is :func:`find_session`'s answer; `changelog` the watcher's events file."""
+    """The sink for `mode`. `session` is :func:`find_session`'s answer; `changelog` the watcher's events file.
+
+    `more` maps the keys of the other resources of a watch of several targets to their events files. Messages then
+    go out per resource, through one rate limiter, so the session's limit for this sender holds for all of them."""
     if mode not in STREAM_MODES:
         raise StreamError(f"--events-stream must be one of {', '.join(STREAM_MODES)}")
     if priority not in MESSAGE_PRIORITIES:
@@ -126,8 +130,20 @@ def open_stream(
     except MessagingUnavailable as exc:
         raise StreamError(f"--events-stream=claude-message is not possible: {exc}; use --events-stream=stdout") from exc
     if choice.mode == "claude-message" and choice.session is not None:
-        sink = claude_message_sink(app, choice.session, resource, sender_name, changelog, priority, status)
-        return Stream(sink)
+        if not more:
+            return Stream(claude_message_sink(app, choice.session, resource, sender_name, changelog, priority, status))
+        from cc_blackbox import Priority, RateLimitedSender
+
+        sender = f"{app.sender}:{os.getpid()}"
+        limiter = RateLimitedSender(sender, sender_name=sender_name, priority=cast(Priority, priority))
+        files = {resource: changelog, **more}
+        sinks = {
+            key: claude_message_sink(
+                app, choice.session, key, sender_name, path, priority, status, rate_limiter=limiter
+            )
+            for key, path in files.items()
+        }
+        return Stream(ResourceSinks(sinks))
     return Stream(StdoutSink(), choice.fallback)
 
 

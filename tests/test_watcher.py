@@ -516,3 +516,129 @@ def test_handlers_not_set_from_python_are_put_back_as_the_default(
     finally:
         for sig, handler in saved.items():
             original(sig, handler)
+
+
+def multi_app(world: World) -> WatchApp:
+    app = WatchApp(
+        "inproc", FakeSource(), "unused.daemon", 1, "0", "inproc: ", "inproc-watcher", command="inproc watch"
+    )
+    return app.with_overrides(source=FakeSource(world, default_interval=0.5), client_poll_ms=20)
+
+
+def once(ready: Callable[[], bool], then: Callable[[], None]) -> None:
+    """Call `then` from a thread as soon as `ready()` holds, while the watch runs in the main thread."""
+
+    def wait() -> None:
+        for _ in range(1000):
+            if ready():
+                then()
+                return
+            time.sleep(0.01)
+
+    threading.Thread(target=wait, daemon=True).start()
+
+
+def logged(path: Path) -> str:
+    try:
+        return path.read_text()
+    except OSError:
+        return ""
+
+
+def test_one_watch_of_several_targets_streams_them_all_and_ends_when_each_ended(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world = World(items={"a": {"status": "done"}, "b": {"status": "done"}})
+    options = WatchOptions(timeout="20s", events_stream="stdout", base_dir=tmp_path, no_daemon=True)
+    targets = [Target("item", "a"), Target("item", "b"), Target("item", "a")]
+    assert cli.run_watch(multi_app(world), targets, options) == 0
+    captured = capsys.readouterr()
+    events = [json.loads(line) for line in captured.out.splitlines()]
+    assert sorted((e["resource"], e["seq"], e["kind"]) for e in events) == [
+        ("item a", 1, "watch_started"),
+        ("item a", 2, "watch_ended"),
+        ("item b", 1, "watch_started"),
+        ("item b", 2, "watch_ended"),
+    ]
+    for ident in "ab":
+        changelog = [json.loads(line) for line in (tmp_path / "item" / ident / "events.jsonl").read_text().splitlines()]
+        assert [e["resource"] for e in changelog] == [f"item {ident}"] * 2
+    header = [line for line in captured.err.splitlines() if line.startswith("inproc: ")]
+    assert header[:6] == [
+        "inproc: resource: item a",
+        f"inproc: dir: {tmp_path / 'item' / 'a'}",
+        f"inproc: changelog: {tmp_path / 'item' / 'a' / 'events.jsonl'}",
+        "inproc: resource: item b",
+        f"inproc: dir: {tmp_path / 'item' / 'b'}",
+        f"inproc: changelog: {tmp_path / 'item' / 'b' / 'events.jsonl'}",
+    ]
+    assert "inproc: ends: when every resource ended or after 20s" in header
+    assert any(line.startswith("inproc: restart with: inproc watch item a b ") for line in header)
+    assert "inproc: ended: item a: done (already done when the watch started)" in header
+
+
+def test_until_of_one_target_ends_them_all_and_a_failed_target_sets_the_exit_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world = World(items={"a": {"status": "open"}})
+    options = WatchOptions(
+        until="status_changed", timeout="20s", events_stream="stdout", base_dir=tmp_path, no_daemon=True
+    )
+
+    def started_and_b_gone() -> bool:
+        a, b = (logged(tmp_path / "item" / ident / "events.jsonl") for ident in "ab")
+        return "watch_started" in a and "watch_ended" in b
+
+    once(started_and_b_gone, lambda: world.items.update(a={"status": "review"}))
+    assert cli.run_watch(multi_app(world), [Target("item", "a"), Target("item", "b")], options) == 1
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+
+    def of(resource: str) -> list[tuple[str, Any]]:
+        return [(e["kind"], e["data"].get("reason")) for e in events if e["resource"] == resource]
+
+    # b does not exist: it ends with an error, and a goes on alone until its first status change.
+    assert of("item b") == [("watch_ended", "not_found")]
+    assert of("item a") == [("watch_started", None), ("status_changed", None), ("watch_ended", "until")]
+    assert events[-1]["data"] == {"reason": "until", "event": "status_changed", "seq": 2, "resource": "item a"}
+
+
+def test_every_target_of_a_watch_resubscribes_after_its_lease_expired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world = World(items={"a": {"status": "open"}, "b": {"status": "open"}})
+    app = multi_app(world)
+    backends: list[InProcessBackend] = []
+
+    def backend_of(app: WatchApp, no_daemon: bool) -> InProcessBackend:
+        backends.append(InProcessBackend(app))
+        return backends[-1]
+
+    monkeypatch.setattr(cli, "default_backend", backend_of)
+    options = WatchOptions(timeout="20s", until="status_changed", events_stream="stdout", base_dir=tmp_path)
+
+    def both_started() -> bool:
+        return all((tmp_path / "item" / ident / "baseline.json").is_file() for ident in "ab")
+
+    def expire_and_change() -> None:
+        engine = backends[0].engine
+        done = threading.Event()
+
+        def expire() -> None:
+            engine.reap(time.monotonic() + 3600)
+            world.items["b"] = {"status": "review"}
+            done.set()
+
+        backends[0]._loop.call_soon_threadsafe(expire)
+        done.wait(5)
+
+    once(both_started, expire_and_change)
+    assert cli.run_watch(app, [Target("item", "a"), Target("item", "b")], options) == 0
+    captured = capsys.readouterr()
+    events = [(e["resource"], e["kind"]) for e in map(json.loads, captured.out.splitlines())]
+    assert "daemon restarted, subscribing again" in captured.err
+    # a's new watch_started repeats a known snapshot and is dropped; b's names a new one, and the change in the gap
+    # is reported as well.
+    assert [kind for resource, kind in events if resource == "item a"] == ["watch_started", "watch_ended"]
+    b = [kind for resource, kind in events if resource == "item b"]
+    assert b[0] == "watch_started" and b[-2:] == ["status_changed", "watch_ended"]
+    assert len(backends[0].engine.subscriptions) == 0
