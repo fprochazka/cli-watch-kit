@@ -30,7 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 claude-code = [
-  "cc-blackbox>=0.11,<0.13",
+  "cc-blackbox>=0.11,<0.14",
 ]
 
 [project.urls]
@@ -54,7 +54,7 @@ packages = ["src/cli_watch_kit"]
 
 [dependency-groups]
 dev = [
-  "cc-blackbox>=0.11,<0.13",
+  "cc-blackbox>=0.11,<0.14",
   "mypy>=1.15",
   "pytest>=8.0",
   "ruff>=0.14",
