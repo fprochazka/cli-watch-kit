@@ -154,6 +154,14 @@ With the `claude-code` extra, `--events-stream=auto` (the default) sends the eve
 
 Only the message with `watch_started` names the resource dir and the changelog; its `watch_started` drops the summary's `dir`, and `WatchApp.announced` can rewrite it further (glab-watch makes its threads dir relative there). A message's sender id is `<WatchApp.sender>:<pid>` (default: the app's name), and its sender name is what `run_watch(sender_name=...)` says (default: `<command> <kind> <id>`, with every id of a watch of several targets).
 
+### bypassPermissions sessions
+
+Claude Code holds a message for its user's approval when the receiving session runs in `bypassPermissions` mode and cannot verify the sender. The watcher's events then show up as "Held peer message … The sender did not attest its permission mode" instead of reaching the model. Sessions in other modes, auto included, deliver them.
+
+Start the watcher from the receiving session's own Bash tool. Claude Code delivers messages from its own child processes even in bypass mode: on Linux it checks the process tree, and on macOS and in containers where `claude` runs as PID 1 the watcher also proves it with the session's `CLAUDE_CODE_MESSAGING_TOKEN`, which cc-blackbox 0.14.1 and later sends. A watcher started from another terminal or another session stays held.
+
+If the events are still held, avoid setting `"crossSessionInbound": "accept"` in your user settings. It lets every bypass session take messages from any local sender, other Claude Code sessions included, so a session that read untrusted input could drive one that runs commands without asking. Limit it to one run with `claude --settings '{"crossSessionInbound":"accept"}'`, or run the watching session in auto mode. See [cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging) and [`crossSessionInbound`](https://code.claude.com/docs/en/settings-reference#crosssessioninbound).
+
 ## Developing
 
 ```bash
